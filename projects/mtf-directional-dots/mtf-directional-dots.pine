@@ -1,0 +1,203 @@
+//@version=6
+// ─────────────────────────────────────────────
+// MTF Directional Dots V6
+// Sub-pane dot rows — timeframe per row, row on/off toggles, Row position: Centered / Top / Spread in fixed 0-5 scale
+// Alignment detection: all active rows green (BULL) or all red (BEAR), confirmed bars only
+// Alignment markers: user-selectable shape + color per marker, drawn as LABEL DRAWINGS (labels never affect pane auto-scale)
+// [25] offset inside request.security
+// Works correctly on 1 minute chart
+// Requires B-ADJ ON for futures charts
+// ─────────────────────────────────────────────
+indicator("MTF Directional Dots V6", shorttitle="MTF Directional Dots V6", overlay=false, max_labels_count=500)
+
+// ─────────────────────────────────────────────
+// INPUTS — per-row timeframes + display options
+// (listed Row 4 -> Row 1 to match the plot: Row 4 on top, Row 1 at bottom)
+// ─────────────────────────────────────────────
+string tf4 = input.timeframe("1",  "Row 4 timeframe")
+string tf3 = input.timeframe("10", "Row 3 timeframe")
+string tf2 = input.timeframe("60", "Row 2 timeframe")
+string tf1 = input.timeframe("D",  "Row 1 timeframe")
+string labelSizeOpt = input.string("Normal", "Label size", options=["Auto", "Tiny", "Small", "Normal", "Large", "Huge"])
+string labelSize = labelSizeOpt == "Auto" ? size.auto : labelSizeOpt == "Tiny" ? size.tiny : labelSizeOpt == "Small" ? size.small : labelSizeOpt == "Normal" ? size.normal : labelSizeOpt == "Large" ? size.large : size.huge
+string rowPosOpt = input.string("Centered", "Row position", options=["Centered", "Top", "Spread"])
+
+// ─────────────────────────────────────────────
+// INPUTS — markers (location, size, per-marker toggle + shape + color)
+// ─────────────────────────────────────────────
+string sigLocOpt = input.string("Price pane", "Signal location", options=["Price pane", "Sub-pane"], group="Markers")
+bool onPrice = sigLocOpt == "Price pane"
+string sigSizeOpt = input.string("Normal", "Signal size", options=["Tiny", "Small", "Normal", "Large", "Huge"], group="Markers")
+string sigSize = sigSizeOpt == "Tiny" ? size.tiny : sigSizeOpt == "Small" ? size.small : sigSizeOpt == "Normal" ? size.normal : sigSizeOpt == "Large" ? size.large : size.huge
+bool showBull = input.bool(true, "Show bullish start", group="Markers")
+bool showBear = input.bool(true, "Show bearish start", group="Markers")
+bool showEnd  = input.bool(true, "Show end (misalignment)", group="Markers")
+string bullShapeOpt = input.string("Triangle up",   "Bull start shape", options=["Triangle up", "Triangle down", "Arrow up", "Arrow down", "Circle", "Diamond", "Square", "Flag", "Cross", "X cross", "Label up", "Label down"], group="Markers")
+color  bullColIn    = input.color(color.green, "Bull start color", group="Markers")
+string bearShapeOpt = input.string("Triangle down", "Bear start shape", options=["Triangle up", "Triangle down", "Arrow up", "Arrow down", "Circle", "Diamond", "Square", "Flag", "Cross", "X cross", "Label up", "Label down"], group="Markers")
+color  bearColIn    = input.color(color.red, "Bear start color", group="Markers")
+string endShapeOpt  = input.string("Diamond",       "End shape", options=["Triangle up", "Triangle down", "Arrow up", "Arrow down", "Circle", "Diamond", "Square", "Flag", "Cross", "X cross", "Label up", "Label down"], group="Markers")
+color  endColIn     = input.color(color.gray, "End color", group="Markers")
+styleOf(string s) =>
+    s == "Triangle up" ? label.style_triangleup : s == "Triangle down" ? label.style_triangledown : s == "Arrow up" ? label.style_arrowup : s == "Arrow down" ? label.style_arrowdown : s == "Circle" ? label.style_circle : s == "Diamond" ? label.style_diamond : s == "Square" ? label.style_square : s == "Flag" ? label.style_flag : s == "Cross" ? label.style_cross : s == "X cross" ? label.style_xcross : s == "Label up" ? label.style_label_up : label.style_label_down
+string bullStyle = styleOf(bullShapeOpt)
+string bearStyle = styleOf(bearShapeOpt)
+string endStyle  = styleOf(endShapeOpt)
+
+// ─────────────────────────────────────────────
+// INPUTS — row visibility (listed Row 4 -> Row 1 to match the plot)
+// ─────────────────────────────────────────────
+bool show4 = input.bool(true, "Show Row 4", group="Row visibility")
+bool show3 = input.bool(true, "Show Row 3", group="Row visibility")
+bool show2 = input.bool(true, "Show Row 2", group="Row visibility")
+bool show1 = input.bool(true, "Show Row 1", group="Row visibility")
+
+// ─────────────────────────────────────────────
+// REPACK — N enabled rows placed in the fixed 0-5 scale by "Row position":
+// Centered: tight, centered on 2.5 -> y = 2.5 - (N-1)/2 + i
+// Top:      tight, pinned high     -> y = 4 - i
+// Spread:   even margins           -> y = 5 * (i+1)/(N+1)
+// (i = 0..N-1 = index among visible rows, original order kept)
+// ─────────────────────────────────────────────
+int n1 = show1 ? 1 : 0
+int n2 = show2 ? 1 : 0
+int n3 = show3 ? 1 : 0
+int n4 = show4 ? 1 : 0
+int rowCount = n1 + n2 + n3 + n4
+slotY(int i) =>
+    rowPosOpt == "Centered" ? 2.5 - (rowCount - 1) / 2.0 + i : rowPosOpt == "Top" ? 4.0 - i : 5.0 * (i + 1) / (rowCount + 1)
+float slot1 = show1 ? slotY(n1 - 1) : na
+float slot2 = show2 ? slotY(n1 + n2 - 1) : na
+float slot3 = show3 ? slotY(n1 + n2 + n3 - 1) : na
+float slot4 = show4 ? slotY(n1 + n2 + n3 + n4 - 1) : na
+
+// ─────────────────────────────────────────────
+// HELPER — human-friendly timeframe label
+// "1"->"1M", "10"->"10M", "60"->"1H", "120"->"2H", "D"->"D", "W"->"W", "M"->"Mo"
+// ─────────────────────────────────────────────
+tfLabel(string tf) =>
+    string lbl = na
+    if str.contains(tf, "S")
+        lbl := tf
+    else if str.contains(tf, "D")
+        lbl := tf == "1D" ? "D" : tf
+    else if str.contains(tf, "W")
+        lbl := tf == "1W" ? "W" : tf
+    else if str.contains(tf, "M")
+        lbl := tf == "M" or tf == "1M" ? "Mo" : str.replace(tf, "M", "Mo")
+    else
+        int mins = int(str.tonumber(tf))
+        lbl := mins >= 60 and mins % 60 == 0 ? str.tostring(mins / 60) + "H" : str.tostring(mins) + "M"
+    lbl
+
+string lbl1 = tfLabel(tf1)
+string lbl2 = tfLabel(tf2)
+string lbl3 = tfLabel(tf3)
+string lbl4 = tfLabel(tf4)
+
+// ─────────────────────────────────────────────
+// DAILY
+// ─────────────────────────────────────────────
+float d_close = request.security(syminfo.tickerid, tf1, close)
+float d_top   = request.security(syminfo.tickerid, tf1, math.max(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+float d_bot   = request.security(syminfo.tickerid, tf1, math.min(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+color d_col   = d_close > d_top ? color.green : d_close < d_bot ? color.red : color.yellow
+
+// ─────────────────────────────────────────────
+// HOURLY
+// ─────────────────────────────────────────────
+float h_close = request.security(syminfo.tickerid, tf2, close)
+float h_top   = request.security(syminfo.tickerid, tf2, math.max(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+float h_bot   = request.security(syminfo.tickerid, tf2, math.min(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+color h_col   = h_close > h_top ? color.green : h_close < h_bot ? color.red : color.yellow
+
+// ─────────────────────────────────────────────
+// 10 MIN
+// ─────────────────────────────────────────────
+float t_close = request.security(syminfo.tickerid, tf3, close)
+float t_top   = request.security(syminfo.tickerid, tf3, math.max(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+float t_bot   = request.security(syminfo.tickerid, tf3, math.min(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+color t_col   = t_close > t_top ? color.green : t_close < t_bot ? color.red : color.yellow
+
+// ─────────────────────────────────────────────
+// 1 MIN
+// ─────────────────────────────────────────────
+float m_close = request.security(syminfo.tickerid, tf4, close)
+float m_top   = request.security(syminfo.tickerid, tf4, math.max(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+float m_bot   = request.security(syminfo.tickerid, tf4, math.min(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+color m_col   = m_close > m_top ? color.green : m_close < m_bot ? color.red : color.yellow
+
+// ─────────────────────────────────────────────
+// ALIGNMENT DETECTION — reads d_col/h_col/t_col/m_col + show1..4 only.
+// A row with any na value (close/top/bot) breaks alignment.
+// State latches on confirmed bars only (no intrabar repaint).
+// ─────────────────────────────────────────────
+bool v1 = not na(d_close) and not na(d_top) and not na(d_bot)
+bool v2 = not na(h_close) and not na(h_top) and not na(h_bot)
+bool v3 = not na(t_close) and not na(t_top) and not na(t_bot)
+bool v4 = not na(m_close) and not na(m_top) and not na(m_bot)
+bool bullRaw = rowCount >= 2 and (not show1 or (v1 and d_col == color.green)) and (not show2 or (v2 and h_col == color.green)) and (not show3 or (v3 and t_col == color.green)) and (not show4 or (v4 and m_col == color.green))
+bool bearRaw = rowCount >= 2 and (not show1 or (v1 and d_col == color.red)) and (not show2 or (v2 and h_col == color.red)) and (not show3 or (v3 and t_col == color.red)) and (not show4 or (v4 and m_col == color.red))
+var bool bullishAligned = false
+var bool bearishAligned = false
+bullishAligned := barstate.isconfirmed ? bullRaw : bullishAligned[1]
+bearishAligned := barstate.isconfirmed ? bearRaw : bearishAligned[1]
+bool bullStart = bullishAligned and not bullishAligned[1]
+bool bullEnd   = not bullishAligned and bullishAligned[1]
+bool bearStart = bearishAligned and not bearishAligned[1]
+bool bearEnd   = not bearishAligned and bearishAligned[1]
+bool alignEnd  = bullEnd or bearEnd
+
+// ─────────────────────────────────────────────
+// ALIGNMENT MARKERS — label drawings, NOT plotshapes.
+// Drawings never enter a pane's auto-scale, so the 0-5 anchor range holds.
+// Price pane: anchored to the bar (force_overlay). Sub-pane: fixed heights
+// inside 0-5 (bull side 0.4, bear side 4.6; end marker sits on the side that ended).
+// Shape + color + on/off per marker from the "Markers" inputs. Confirmed transition bars only.
+// ─────────────────────────────────────────────
+if bullStart and showBull
+    if onPrice
+        label.new(bar_index, na, "", yloc=yloc.belowbar, style=bullStyle, color=bullColIn, size=sigSize, force_overlay=true)
+    else
+        label.new(bar_index, 0.4, "", style=bullStyle, color=bullColIn, size=sigSize)
+if bearStart and showBear
+    if onPrice
+        label.new(bar_index, na, "", yloc=yloc.abovebar, style=bearStyle, color=bearColIn, size=sigSize, force_overlay=true)
+    else
+        label.new(bar_index, 4.6, "", style=bearStyle, color=bearColIn, size=sigSize)
+if alignEnd and showEnd
+    if onPrice
+        label.new(bar_index, na, "", yloc=yloc.abovebar, style=endStyle, color=endColIn, size=sigSize, force_overlay=true)
+    else
+        label.new(bar_index, bullEnd ? 0.4 : 4.6, "", style=endStyle, color=endColIn, size=sigSize)
+
+// ─────────────────────────────────────────────
+// PLOTS — transparent scale anchors at fixed 0 and 5 (counted in auto-scale),
+// enabled rows placed between them per "Row position"
+// ─────────────────────────────────────────────
+plot(0, "Scale anchor low",  color=color.new(color.black, 100))
+plot(5, "Scale anchor high", color=color.new(color.black, 100))
+plot(slot1, "Daily",  color=d_col, linewidth=10, style=plot.style_circles)
+plot(slot2, "Hourly", color=h_col, linewidth=10, style=plot.style_circles)
+plot(slot3, "10 Min", color=t_col, linewidth=10, style=plot.style_circles)
+plot(slot4, "1 Min",  color=m_col, linewidth=10, style=plot.style_circles)
+
+// ─────────────────────────────────────────────
+// LABELS
+// ─────────────────────────────────────────────
+var label ld = na
+var label lh = na
+var label lt = na
+var label lm = na
+label.delete(ld)
+label.delete(lh)
+label.delete(lt)
+label.delete(lm)
+if show1
+    ld := label.new(bar_index, slot1, lbl1, style=label.style_label_left, color=color.new(color.black,100), textcolor=d_col, size=labelSize)
+if show2
+    lh := label.new(bar_index, slot2, lbl2, style=label.style_label_left, color=color.new(color.black,100), textcolor=h_col, size=labelSize)
+if show3
+    lt := label.new(bar_index, slot3, lbl3, style=label.style_label_left, color=color.new(color.black,100), textcolor=t_col, size=labelSize)
+if show4
+    lm := label.new(bar_index, slot4, lbl4, style=label.style_label_left, color=color.new(color.black,100), textcolor=m_col, size=labelSize)
