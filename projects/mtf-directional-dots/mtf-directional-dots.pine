@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────
-// MTF Directional Dots V6
+// Cloud MTF Directional Dots
 // Sub-pane dot rows — timeframe per row, row on/off toggles, Row position: Centered / Top / Spread in fixed 0-5 scale
 // Alignment detection: all active rows green (BULL) or all red (BEAR), confirmed bars only
 // Alignment markers: user-selectable shape + color per marker, drawn as LABEL DRAWINGS (labels never affect pane auto-scale)
@@ -15,36 +15,36 @@
 // Works correctly on 1 minute chart
 // Requires B-ADJ ON for futures charts
 // ─────────────────────────────────────────────
-indicator("MTF Directional Dots V6", shorttitle="MTF Directional Dots V6", overlay=false, max_labels_count=500)
+indicator("Cloud MTF Directional Dots", shorttitle="Cloud MTF Directional Dots", overlay=false, max_labels_count=500)
 
 // ─────────────────────────────────────────────
 // INPUTS — per-row timeframes + display options
 // (listed Row 4 -> Row 1 to match the plot: Row 4 on top, Row 1 at bottom)
 // ─────────────────────────────────────────────
-string tf4 = input.timeframe("1",  "Row 4 timeframe")
-string tf3 = input.timeframe("10", "Row 3 timeframe")
-string tf2 = input.timeframe("60", "Row 2 timeframe")
-string tf1 = input.timeframe("D",  "Row 1 timeframe")
-string labelSizeOpt = input.string("Normal", "Label size", options=["Auto", "Tiny", "Small", "Normal", "Large", "Huge"])
+string tf4 = input.timeframe("1",  "Row 4 timeframe", tooltip="The timeframe this row reads. Pick any timeframe at or ABOVE your chart's timeframe. A timeframe below your chart shows 'n/a' (see below).")
+string tf3 = input.timeframe("10", "Row 3 timeframe", tooltip="The timeframe this row reads. Pick any timeframe at or ABOVE your chart's timeframe. A timeframe below your chart shows 'n/a' (see below).")
+string tf2 = input.timeframe("60", "Row 2 timeframe", tooltip="The timeframe this row reads. Pick any timeframe at or ABOVE your chart's timeframe. A timeframe below your chart shows 'n/a' (see below).")
+string tf1 = input.timeframe("D",  "Row 1 timeframe", tooltip="The timeframe this row reads. Pick any timeframe at or ABOVE your chart's timeframe. A timeframe below your chart shows 'n/a' (see below).")
+string labelSizeOpt = input.string("Normal", "Label size", options=["Auto", "Tiny", "Small", "Normal", "Large", "Huge"], tooltip="Text size of the row labels (1M, 1H, D, etc.) shown to the right of each dot row.")
 string labelSize = labelSizeOpt == "Auto" ? size.auto : labelSizeOpt == "Tiny" ? size.tiny : labelSizeOpt == "Small" ? size.small : labelSizeOpt == "Normal" ? size.normal : labelSizeOpt == "Large" ? size.large : size.huge
-string rowPosOpt = input.string("Centered", "Row position", options=["Centered", "Top", "Spread"])
+string rowPosOpt = input.string("Centered", "Row position", options=["Centered", "Top", "Spread"], tooltip="How the visible rows are arranged in the pane: Centered (grouped in the middle), Top (stacked at the top), or Spread (evenly filling the height).")
 
 // ─────────────────────────────────────────────
 // INPUTS — markers (location, size, per-marker toggle + shape + color)
 // ─────────────────────────────────────────────
-string sigLocOpt = input.string("Price pane", "Signal location", options=["Price pane", "Sub-pane"], group="Markers")
+string sigLocOpt = input.string("Price pane", "Signal location", options=["Price pane", "Sub-pane"], group="Markers", tooltip="Where the alignment triangles/end-marker are drawn: on the price pane (over the candles) or in this sub-pane.")
 bool onPrice = sigLocOpt == "Price pane"
-string sigSizeOpt = input.string("Normal", "Signal size", options=["Tiny", "Small", "Normal", "Large", "Huge"], group="Markers")
+string sigSizeOpt = input.string("Normal", "Signal size", options=["Tiny", "Small", "Normal", "Large", "Huge"], group="Markers", tooltip="Size of the alignment markers (triangles and the end marker).")
 string sigSize = sigSizeOpt == "Tiny" ? size.tiny : sigSizeOpt == "Small" ? size.small : sigSizeOpt == "Normal" ? size.normal : sigSizeOpt == "Large" ? size.large : size.huge
-bool showBull = input.bool(true, "Show bullish start", group="Markers")
-bool showBear = input.bool(true, "Show bearish start", group="Markers")
-bool showEnd  = input.bool(true, "Show end (misalignment)", group="Markers")
-string bullShapeOpt = input.string("Triangle up",   "Bull start shape", options=["Triangle up", "Triangle down", "Arrow up", "Arrow down", "Circle", "Diamond", "Square", "Flag", "Cross", "X cross", "Label up", "Label down"], group="Markers")
-color  bullColIn    = input.color(color.green, "Bull start color", group="Markers")
-string bearShapeOpt = input.string("Triangle down", "Bear start shape", options=["Triangle up", "Triangle down", "Arrow up", "Arrow down", "Circle", "Diamond", "Square", "Flag", "Cross", "X cross", "Label up", "Label down"], group="Markers")
-color  bearColIn    = input.color(color.red, "Bear start color", group="Markers")
-string endShapeOpt  = input.string("Diamond",       "End shape", options=["Triangle up", "Triangle down", "Arrow up", "Arrow down", "Circle", "Diamond", "Square", "Flag", "Cross", "X cross", "Label up", "Label down"], group="Markers")
-color  endColIn     = input.color(color.yellow, "End color", group="Markers")
+bool showBull = input.bool(true, "Show bullish start", group="Markers", tooltip="Show or hide this signal's marker on the chart.")
+bool showBear = input.bool(true, "Show bearish start", group="Markers", tooltip="Show or hide this signal's marker on the chart.")
+bool showEnd  = input.bool(true, "Show end (misalignment)", group="Markers", tooltip="Show or hide this signal's marker on the chart.")
+string bullShapeOpt = input.string("Triangle up",   "Bull start shape", options=["Triangle up", "Triangle down", "Arrow up", "Arrow down", "Circle", "Diamond", "Square", "Flag", "Cross", "X cross", "Label up", "Label down"], group="Markers", tooltip="The symbol drawn for this signal. Choose from triangles, arrows, circle, diamond, flag, cross, etc.")
+color  bullColIn    = input.color(color.green, "Bull start color", group="Markers", tooltip="The color of this signal's marker.")
+string bearShapeOpt = input.string("Triangle down", "Bear start shape", options=["Triangle up", "Triangle down", "Arrow up", "Arrow down", "Circle", "Diamond", "Square", "Flag", "Cross", "X cross", "Label up", "Label down"], group="Markers", tooltip="The symbol drawn for this signal. Choose from triangles, arrows, circle, diamond, flag, cross, etc.")
+color  bearColIn    = input.color(color.red, "Bear start color", group="Markers", tooltip="The color of this signal's marker.")
+string endShapeOpt  = input.string("Diamond",       "End shape", options=["Triangle up", "Triangle down", "Arrow up", "Arrow down", "Circle", "Diamond", "Square", "Flag", "Cross", "X cross", "Label up", "Label down"], group="Markers", tooltip="The symbol drawn for this signal. Choose from triangles, arrows, circle, diamond, flag, cross, etc.")
+color  endColIn     = input.color(color.yellow, "End color", group="Markers", tooltip="The color of this signal's marker.")
 styleOf(string s) =>
     s == "Triangle up" ? label.style_triangleup : s == "Triangle down" ? label.style_triangledown : s == "Arrow up" ? label.style_arrowup : s == "Arrow down" ? label.style_arrowdown : s == "Circle" ? label.style_circle : s == "Diamond" ? label.style_diamond : s == "Square" ? label.style_square : s == "Flag" ? label.style_flag : s == "Cross" ? label.style_cross : s == "X cross" ? label.style_xcross : s == "Label up" ? label.style_label_up : label.style_label_down
 string bullStyle = styleOf(bullShapeOpt)
@@ -54,47 +54,47 @@ string endStyle  = styleOf(endShapeOpt)
 // ─────────────────────────────────────────────
 // INPUTS — alerts (fired via alert() on confirmed transition bars)
 // ─────────────────────────────────────────────
-bool alertBull = input.bool(true, "Alert: bullish start", group="Alerts")
-bool alertBear = input.bool(true, "Alert: bearish start", group="Alerts")
-bool alertEndT = input.bool(true, "Alert: misalignment (end)", group="Alerts")
-string msgFmtOpt = input.string("TradersPost JSON", "Message format", options=["TradersPost JSON", "Plain text"], group="Alerts")
-string bullJsonIn = input.text_area('{"ticker":"{{ticker}}","action":"buy","sentiment":"long"}', "Bull message (TradersPost JSON)", group="Alerts")
-string bullTextIn = input.text_area("Bullish alignment START on {{ticker}} ({{interval}})", "Bull message (Plain text)", group="Alerts")
-string bearJsonIn = input.text_area('{"ticker":"{{ticker}}","action":"sell","sentiment":"short"}', "Bear message (TradersPost JSON)", group="Alerts")
-string bearTextIn = input.text_area("Bearish alignment START on {{ticker}} ({{interval}})", "Bear message (Plain text)", group="Alerts")
-string endJsonIn  = input.text_area('{"ticker":"{{ticker}}","action":"exit","sentiment":"flat"}', "End message (TradersPost JSON)", group="Alerts")
-string endTextIn  = input.text_area("Alignment ENDED (misalignment) on {{ticker}} ({{interval}})", "End message (Plain text)", group="Alerts")
+bool alertBull = input.bool(true, "Alert: bullish start", group="Alerts", tooltip="Enable the alert for this event. Fires once per confirmed bar close (never intrabar, never repaints).")
+bool alertBear = input.bool(true, "Alert: bearish start", group="Alerts", tooltip="Enable the alert for this event. Fires once per confirmed bar close (never intrabar, never repaints).")
+bool alertEndT = input.bool(true, "Alert: misalignment (end)", group="Alerts", tooltip="Enable the alert for this event. Fires once per confirmed bar close (never intrabar, never repaints).")
+string msgFmtOpt = input.string("TradersPost JSON", "Message format", options=["TradersPost JSON", "Plain text"], group="Alerts", tooltip="Choose the alert message style: TradersPost JSON (ready for auto-trading via a TradersPost webhook) or plain readable text.")
+string bullJsonIn = input.text_area('{"ticker":"{{ticker}}","action":"buy","sentiment":"long"}', "Bull message (TradersPost JSON)", group="Alerts", tooltip="The alert message sent for this event. Edit freely. {{ticker}} and {{interval}} are filled in automatically.")
+string bullTextIn = input.text_area("Bullish alignment START on {{ticker}} ({{interval}})", "Bull message (Plain text)", group="Alerts", tooltip="The alert message sent for this event. Edit freely. {{ticker}} and {{interval}} are filled in automatically.")
+string bearJsonIn = input.text_area('{"ticker":"{{ticker}}","action":"sell","sentiment":"short"}', "Bear message (TradersPost JSON)", group="Alerts", tooltip="The alert message sent for this event. Edit freely. {{ticker}} and {{interval}} are filled in automatically.")
+string bearTextIn = input.text_area("Bearish alignment START on {{ticker}} ({{interval}})", "Bear message (Plain text)", group="Alerts", tooltip="The alert message sent for this event. Edit freely. {{ticker}} and {{interval}} are filled in automatically.")
+string endJsonIn  = input.text_area('{"ticker":"{{ticker}}","action":"exit","sentiment":"flat"}', "End message (TradersPost JSON)", group="Alerts", tooltip="The alert message sent for this event. Edit freely. {{ticker}} and {{interval}} are filled in automatically.")
+string endTextIn  = input.text_area("Alignment ENDED (misalignment) on {{ticker}} ({{interval}})", "End message (Plain text)", group="Alerts", tooltip="The alert message sent for this event. Edit freely. {{ticker}} and {{interval}} are filled in automatically.")
 
 // ─────────────────────────────────────────────
 // INPUTS — dashboard (pane + position independent)
 // ─────────────────────────────────────────────
-bool showDash = input.bool(true, "Show dashboard", group="Dashboard")
-bool dashOnPrice = input.string("Price pane", "Dashboard pane", options=["Price pane", "Sub-pane"], group="Dashboard") == "Price pane"
-string dashPosOpt = input.string("Upper Right", "Dashboard position", options=["Upper Left", "Center Left", "Lower Left", "Upper Right", "Center Right", "Lower Right"], group="Dashboard")
+bool showDash = input.bool(true, "Show dashboard", group="Dashboard", tooltip="Show or hide the status table.")
+bool dashOnPrice = input.string("Price pane", "Dashboard pane", options=["Price pane", "Sub-pane"], group="Dashboard", tooltip="Put the status table on the price pane (over the candles) or in this sub-pane.") == "Price pane"
+string dashPosOpt = input.string("Upper Right", "Dashboard position", options=["Upper Left", "Center Left", "Lower Left", "Upper Right", "Center Right", "Lower Right"], group="Dashboard", tooltip="Which corner/edge of the pane the status table sits in.")
 
 // ─────────────────────────────────────────────
 // INPUTS — highlight (independent background + bar coloring per state; all OFF by default)
 // ─────────────────────────────────────────────
-bool  bgBullOn  = input.bool(false, "BG: bullish", group="Highlight")
-color bgBullCol = input.color(color.new(color.green, 85), "BG bull color", group="Highlight")
-bool  bgBearOn  = input.bool(false, "BG: bearish", group="Highlight")
-color bgBearCol = input.color(color.new(color.red, 85), "BG bear color", group="Highlight")
-bool  bgMisOn   = input.bool(false, "BG: misalign", group="Highlight")
-color bgMisCol  = input.color(color.new(color.yellow, 85), "BG misalign color", group="Highlight")
-bool  barBullOn  = input.bool(false, "Bars: bullish", group="Highlight")
-color barBullCol = input.color(color.green, "Bar bull color", group="Highlight")
-bool  barBearOn  = input.bool(false, "Bars: bearish", group="Highlight")
-color barBearCol = input.color(color.red, "Bar bear color", group="Highlight")
-bool  barMisOn   = input.bool(false, "Bars: misalign", group="Highlight")
-color barMisCol  = input.color(color.yellow, "Bar misalign color", group="Highlight")
+bool  bgBullOn  = input.bool(false, "BG: bullish", group="Highlight", tooltip="Tint the price-pane BACKGROUND during this state. Background tints are soft/semi-transparent.")
+color bgBullCol = input.color(color.new(color.green, 85), "BG bull color", group="Highlight", tooltip="Background tint color for this state (keep it semi-transparent).")
+bool  bgBearOn  = input.bool(false, "BG: bearish", group="Highlight", tooltip="Tint the price-pane BACKGROUND during this state. Background tints are soft/semi-transparent.")
+color bgBearCol = input.color(color.new(color.red, 85), "BG bear color", group="Highlight", tooltip="Background tint color for this state (keep it semi-transparent).")
+bool  bgMisOn   = input.bool(false, "BG: misalign", group="Highlight", tooltip="Tint the price-pane BACKGROUND during this state. Background tints are soft/semi-transparent.")
+color bgMisCol  = input.color(color.new(color.yellow, 85), "BG misalign color", group="Highlight", tooltip="Background tint color for this state (keep it semi-transparent).")
+bool  barBullOn  = input.bool(false, "Bars: bullish", group="Highlight", tooltip="Recolor the CANDLES solid during this state. Use opaque colors so candles fill fully.")
+color barBullCol = input.color(color.green, "Bar bull color", group="Highlight", tooltip="Solid candle color for this state (use an opaque color).")
+bool  barBearOn  = input.bool(false, "Bars: bearish", group="Highlight", tooltip="Recolor the CANDLES solid during this state. Use opaque colors so candles fill fully.")
+color barBearCol = input.color(color.red, "Bar bear color", group="Highlight", tooltip="Solid candle color for this state (use an opaque color).")
+bool  barMisOn   = input.bool(false, "Bars: misalign", group="Highlight", tooltip="Recolor the CANDLES solid during this state. Use opaque colors so candles fill fully.")
+color barMisCol  = input.color(color.yellow, "Bar misalign color", group="Highlight", tooltip="Solid candle color for this state (use an opaque color).")
 
 // ─────────────────────────────────────────────
 // INPUTS — row visibility (listed Row 4 -> Row 1 to match the plot)
 // ─────────────────────────────────────────────
-bool show4 = input.bool(false, "Show Row 4", group="Row visibility")
-bool show3 = input.bool(true, "Show Row 3", group="Row visibility")
-bool show2 = input.bool(true, "Show Row 2", group="Row visibility")
-bool show1 = input.bool(true, "Show Row 1", group="Row visibility")
+bool show4 = input.bool(false, "Show Row 4", group="Row visibility", tooltip="Turn this timeframe row on or off. You can show any 1 to 4 rows.")
+bool show3 = input.bool(true, "Show Row 3", group="Row visibility", tooltip="Turn this timeframe row on or off. You can show any 1 to 4 rows.")
+bool show2 = input.bool(true, "Show Row 2", group="Row visibility", tooltip="Turn this timeframe row on or off. You can show any 1 to 4 rows.")
+bool show1 = input.bool(true, "Show Row 1", group="Row visibility", tooltip="Turn this timeframe row on or off. You can show any 1 to 4 rows.")
 
 // ─────────────────────────────────────────────
 // TIMEFRAME CLASS — per row vs chart TF (timeframe.in_seconds):
