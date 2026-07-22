@@ -4,6 +4,11 @@
 // Sub-pane dot rows — timeframe per row, row on/off toggles, Row position: Centered / Top / Spread in fixed 0-5 scale
 // Alignment detection: all active rows green (BULL) or all red (BEAR), confirmed bars only
 // Alignment markers: user-selectable shape + color per marker, drawn as LABEL DRAWINGS (labels never affect pane auto-scale)
+// Alerts: alert() on confirmed bull-start / bear-start / end transitions, TradersPost JSON or plain text,
+// {{ticker}} and {{interval}} substituted by the script (alert() does not expand TV placeholders)
+// Dashboard: per-row arrow status + ALIGN summary table, pane (price/sub) + position selectable
+// Highlight: independent background (soft, force_overlay) + bar coloring (opaque) per state:
+// bull / bear / misalign (neither aligned), each with its own on/off toggle and color
 // Repaint hardening: rows ABOVE chart TF use confirmed-HTF pulls (expr[1] + lookahead_on);
 // same-TF rows unchanged; rows BELOW chart TF show "n/a" and are excluded from alignment.
 // [25] offset inside request.security ([26] on confirmed pulls = [25] displacement + [1] confirmed shift)
@@ -45,6 +50,43 @@ styleOf(string s) =>
 string bullStyle = styleOf(bullShapeOpt)
 string bearStyle = styleOf(bearShapeOpt)
 string endStyle  = styleOf(endShapeOpt)
+
+// ─────────────────────────────────────────────
+// INPUTS — alerts (fired via alert() on confirmed transition bars)
+// ─────────────────────────────────────────────
+bool alertBull = input.bool(true, "Alert: bullish start", group="Alerts")
+bool alertBear = input.bool(true, "Alert: bearish start", group="Alerts")
+bool alertEndT = input.bool(true, "Alert: misalignment (end)", group="Alerts")
+string msgFmtOpt = input.string("TradersPost JSON", "Message format", options=["TradersPost JSON", "Plain text"], group="Alerts")
+string bullJsonIn = input.text_area('{"ticker":"{{ticker}}","action":"buy","sentiment":"long"}', "Bull message (TradersPost JSON)", group="Alerts")
+string bullTextIn = input.text_area("Bullish alignment START on {{ticker}} ({{interval}})", "Bull message (Plain text)", group="Alerts")
+string bearJsonIn = input.text_area('{"ticker":"{{ticker}}","action":"sell","sentiment":"short"}', "Bear message (TradersPost JSON)", group="Alerts")
+string bearTextIn = input.text_area("Bearish alignment START on {{ticker}} ({{interval}})", "Bear message (Plain text)", group="Alerts")
+string endJsonIn  = input.text_area('{"ticker":"{{ticker}}","action":"exit","sentiment":"flat"}', "End message (TradersPost JSON)", group="Alerts")
+string endTextIn  = input.text_area("Alignment ENDED (misalignment) on {{ticker}} ({{interval}})", "End message (Plain text)", group="Alerts")
+
+// ─────────────────────────────────────────────
+// INPUTS — dashboard (pane + position independent)
+// ─────────────────────────────────────────────
+bool showDash = input.bool(true, "Show dashboard", group="Dashboard")
+bool dashOnPrice = input.string("Price pane", "Dashboard pane", options=["Price pane", "Sub-pane"], group="Dashboard") == "Price pane"
+string dashPosOpt = input.string("Upper Right", "Dashboard position", options=["Upper Left", "Center Left", "Lower Left", "Upper Right", "Center Right", "Lower Right"], group="Dashboard")
+
+// ─────────────────────────────────────────────
+// INPUTS — highlight (independent background + bar coloring per state; all OFF by default)
+// ─────────────────────────────────────────────
+bool  bgBullOn  = input.bool(false, "BG: bullish", group="Highlight")
+color bgBullCol = input.color(color.new(color.green, 85), "BG bull color", group="Highlight")
+bool  bgBearOn  = input.bool(false, "BG: bearish", group="Highlight")
+color bgBearCol = input.color(color.new(color.red, 85), "BG bear color", group="Highlight")
+bool  bgMisOn   = input.bool(false, "BG: misalign", group="Highlight")
+color bgMisCol  = input.color(color.new(color.yellow, 85), "BG misalign color", group="Highlight")
+bool  barBullOn  = input.bool(false, "Bars: bullish", group="Highlight")
+color barBullCol = input.color(color.green, "Bar bull color", group="Highlight")
+bool  barBearOn  = input.bool(false, "Bars: bearish", group="Highlight")
+color barBearCol = input.color(color.red, "Bar bear color", group="Highlight")
+bool  barMisOn   = input.bool(false, "Bars: misalign", group="Highlight")
+color barMisCol  = input.color(color.yellow, "Bar misalign color", group="Highlight")
 
 // ─────────────────────────────────────────────
 // INPUTS — row visibility (listed Row 4 -> Row 1 to match the plot)
@@ -197,6 +239,38 @@ bool bearEnd   = not bearishAligned and bearishAligned[1]
 bool alignEnd  = bullEnd or bearEnd
 
 // ─────────────────────────────────────────────
+// HIGHLIGHT — independent background + bar coloring, driven by the confirmed
+// latched states (non-repaint). misalign = neither bull nor bear aligned.
+// barcolor() always paints the main chart candles; bgcolor() uses force_overlay=true
+// to tint the price pane. Any combination of the six toggles can be enabled.
+// ─────────────────────────────────────────────
+bool misalign = not bullishAligned and not bearishAligned
+color bgHiCol = bullishAligned and bgBullOn ? bgBullCol : bearishAligned and bgBearOn ? bgBearCol : misalign and bgMisOn ? bgMisCol : na
+bgcolor(bgHiCol, force_overlay=true)
+color barHiCol = bullishAligned and barBullOn ? barBullCol : bearishAligned and barBearOn ? barBearCol : misalign and barMisOn ? barMisCol : na
+barcolor(barHiCol)
+
+// ─────────────────────────────────────────────
+// ALERTS — alert() on confirmed transition bars, gated per event.
+// {{ticker}} / {{interval}} are substituted here (alert() sends messages verbatim,
+// TV placeholders are NOT expanded in alert() calls). freq_once_per_bar_close +
+// confirmed-bar transitions = never fires intrabar, never repaints.
+// Setup: Create Alert -> Condition: this indicator -> "Any alert() function call".
+// ─────────────────────────────────────────────
+fillMsg(string t) =>
+    str.replace_all(str.replace_all(t, "{{ticker}}", syminfo.ticker), "{{interval}}", timeframe.period)
+bool useJson = msgFmtOpt == "TradersPost JSON"
+string bullMsg = fillMsg(useJson ? bullJsonIn : bullTextIn)
+string bearMsg = fillMsg(useJson ? bearJsonIn : bearTextIn)
+string endMsg  = fillMsg(useJson ? endJsonIn : endTextIn)
+if bullStart and alertBull
+    alert(bullMsg, alert.freq_once_per_bar_close)
+if bearStart and alertBear
+    alert(bearMsg, alert.freq_once_per_bar_close)
+if alignEnd and alertEndT
+    alert(endMsg, alert.freq_once_per_bar_close)
+
+// ─────────────────────────────────────────────
 // ALIGNMENT MARKERS — label drawings, NOT plotshapes.
 // Drawings never enter a pane's auto-scale, so the 0-5 anchor range holds.
 // Price pane: anchored to the bar (force_overlay). Sub-pane: fixed heights
@@ -250,3 +324,34 @@ if show3
     lt := label.new(bar_index, slot3, below3 ? lbl3 + " n/a" : lbl3, style=label.style_label_left, color=color.new(color.black,100), textcolor=below3 ? color.gray : t_col, size=labelSize)
 if show4
     lm := label.new(bar_index, slot4, below4 ? lbl4 + " n/a" : lbl4, style=label.style_label_left, color=color.new(color.black,100), textcolor=below4 ? color.gray : m_col, size=labelSize)
+
+// ─────────────────────────────────────────────
+// DASHBOARD — reads row colors + latched alignment state only, populated on the
+// last bar. Two tables exist (force_overlay is const): one on the price pane, one
+// in the sub-pane; only the one matching "Dashboard pane" is populated, the other
+// stays empty (an empty table renders nothing). Rows: Row 4 on top, matching the
+// pane; below-chart rows show "n/a" in gray. Summary row = ALIGN: BULL / BEAR / —.
+// ─────────────────────────────────────────────
+string dashPos = dashPosOpt == "Upper Left" ? position.top_left : dashPosOpt == "Center Left" ? position.middle_left : dashPosOpt == "Lower Left" ? position.bottom_left : dashPosOpt == "Upper Right" ? position.top_right : dashPosOpt == "Center Right" ? position.middle_right : position.bottom_right
+var table dashPrice = table.new(dashPos, 2, 5, bgcolor=color.new(color.black, 20), force_overlay=true)
+var table dashPane  = table.new(dashPos, 2, 5, bgcolor=color.new(color.black, 20))
+table dash = dashOnPrice ? dashPrice : dashPane
+dashRow(int r, string tfTxt, bool isBelow, color c) =>
+    table.cell(dash, 0, r, tfTxt, text_color=color.white, text_size=size.normal)
+    table.cell(dash, 1, r, isBelow ? "n/a" : c == color.green ? "▲" : c == color.red ? "▼" : "–", text_color=isBelow ? color.gray : c, text_size=size.normal)
+if showDash and barstate.islast
+    int r = 0
+    if show4
+        dashRow(r, lbl4, below4, m_col)
+        r += 1
+    if show3
+        dashRow(r, lbl3, below3, t_col)
+        r += 1
+    if show2
+        dashRow(r, lbl2, below2, h_col)
+        r += 1
+    if show1
+        dashRow(r, lbl1, below1, d_col)
+        r += 1
+    table.cell(dash, 0, r, "ALIGN", text_color=color.white, text_size=size.normal)
+    table.cell(dash, 1, r, bullishAligned ? "BULL" : bearishAligned ? "BEAR" : "—", text_color=bullishAligned ? color.green : bearishAligned ? color.red : color.gray, text_size=size.normal)
