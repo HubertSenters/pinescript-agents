@@ -4,7 +4,9 @@
 // Sub-pane dot rows — timeframe per row, row on/off toggles, Row position: Centered / Top / Spread in fixed 0-5 scale
 // Alignment detection: all active rows green (BULL) or all red (BEAR), confirmed bars only
 // Alignment markers: user-selectable shape + color per marker, drawn as LABEL DRAWINGS (labels never affect pane auto-scale)
-// [25] offset inside request.security
+// Repaint hardening: rows ABOVE chart TF use confirmed-HTF pulls (expr[1] + lookahead_on);
+// same-TF rows unchanged; rows BELOW chart TF show "n/a" and are excluded from alignment.
+// [25] offset inside request.security ([26] on confirmed pulls = [25] displacement + [1] confirmed shift)
 // Works correctly on 1 minute chart
 // Requires B-ADJ ON for futures charts
 // ─────────────────────────────────────────────
@@ -37,7 +39,7 @@ color  bullColIn    = input.color(color.green, "Bull start color", group="Marker
 string bearShapeOpt = input.string("Triangle down", "Bear start shape", options=["Triangle up", "Triangle down", "Arrow up", "Arrow down", "Circle", "Diamond", "Square", "Flag", "Cross", "X cross", "Label up", "Label down"], group="Markers")
 color  bearColIn    = input.color(color.red, "Bear start color", group="Markers")
 string endShapeOpt  = input.string("Diamond",       "End shape", options=["Triangle up", "Triangle down", "Arrow up", "Arrow down", "Circle", "Diamond", "Square", "Flag", "Cross", "X cross", "Label up", "Label down"], group="Markers")
-color  endColIn     = input.color(color.gray, "End color", group="Markers")
+color  endColIn     = input.color(color.yellow, "End color", group="Markers")
 styleOf(string s) =>
     s == "Triangle up" ? label.style_triangleup : s == "Triangle down" ? label.style_triangledown : s == "Arrow up" ? label.style_arrowup : s == "Arrow down" ? label.style_arrowdown : s == "Circle" ? label.style_circle : s == "Diamond" ? label.style_diamond : s == "Square" ? label.style_square : s == "Flag" ? label.style_flag : s == "Cross" ? label.style_cross : s == "X cross" ? label.style_xcross : s == "Label up" ? label.style_label_up : label.style_label_down
 string bullStyle = styleOf(bullShapeOpt)
@@ -47,10 +49,24 @@ string endStyle  = styleOf(endShapeOpt)
 // ─────────────────────────────────────────────
 // INPUTS — row visibility (listed Row 4 -> Row 1 to match the plot)
 // ─────────────────────────────────────────────
-bool show4 = input.bool(true, "Show Row 4", group="Row visibility")
+bool show4 = input.bool(false, "Show Row 4", group="Row visibility")
 bool show3 = input.bool(true, "Show Row 3", group="Row visibility")
 bool show2 = input.bool(true, "Show Row 2", group="Row visibility")
 bool show1 = input.bool(true, "Show Row 1", group="Row visibility")
+
+// ─────────────────────────────────────────────
+// TIMEFRAME CLASS — per row vs chart TF (timeframe.in_seconds):
+// above -> confirmed-HTF pulls; same -> current pulls (unchanged); below -> "n/a" row
+// ─────────────────────────────────────────────
+int chartSec = timeframe.in_seconds(timeframe.period)
+bool above1 = timeframe.in_seconds(tf1) > chartSec
+bool below1 = timeframe.in_seconds(tf1) < chartSec
+bool above2 = timeframe.in_seconds(tf2) > chartSec
+bool below2 = timeframe.in_seconds(tf2) < chartSec
+bool above3 = timeframe.in_seconds(tf3) > chartSec
+bool below3 = timeframe.in_seconds(tf3) < chartSec
+bool above4 = timeframe.in_seconds(tf4) > chartSec
+bool below4 = timeframe.in_seconds(tf4) < chartSec
 
 // ─────────────────────────────────────────────
 // REPACK — N enabled rows placed in the fixed 0-5 scale by "Row position":
@@ -96,48 +112,80 @@ string lbl3 = tfLabel(tf3)
 string lbl4 = tfLabel(tf4)
 
 // ─────────────────────────────────────────────
-// DAILY
+// DAILY — current pulls (same/below TF) + confirmed pulls (above TF), selected per row.
+// Confirmed spans use [26] = [25] displacement + [1] confirmed shift, so
+// close[1] vs span keeps the exact 25-bar relationship: close(N-1) vs span((N-1)-25).
 // ─────────────────────────────────────────────
-float d_close = request.security(syminfo.tickerid, tf1, close)
-float d_top   = request.security(syminfo.tickerid, tf1, math.max(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
-float d_bot   = request.security(syminfo.tickerid, tf1, math.min(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+float d_close_cur = request.security(syminfo.tickerid, tf1, close)
+float d_top_cur   = request.security(syminfo.tickerid, tf1, math.max(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+float d_bot_cur   = request.security(syminfo.tickerid, tf1, math.min(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+float d_close_cf  = request.security(syminfo.tickerid, tf1, close[1], lookahead=barmerge.lookahead_on)
+float d_top_cf    = request.security(syminfo.tickerid, tf1, math.max(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[26], lookahead=barmerge.lookahead_on)
+float d_bot_cf    = request.security(syminfo.tickerid, tf1, math.min(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[26], lookahead=barmerge.lookahead_on)
+float d_close = above1 ? d_close_cf : d_close_cur
+float d_top   = above1 ? d_top_cf : d_top_cur
+float d_bot   = above1 ? d_bot_cf : d_bot_cur
 color d_col   = d_close > d_top ? color.green : d_close < d_bot ? color.red : color.yellow
 
 // ─────────────────────────────────────────────
 // HOURLY
 // ─────────────────────────────────────────────
-float h_close = request.security(syminfo.tickerid, tf2, close)
-float h_top   = request.security(syminfo.tickerid, tf2, math.max(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
-float h_bot   = request.security(syminfo.tickerid, tf2, math.min(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+float h_close_cur = request.security(syminfo.tickerid, tf2, close)
+float h_top_cur   = request.security(syminfo.tickerid, tf2, math.max(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+float h_bot_cur   = request.security(syminfo.tickerid, tf2, math.min(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+float h_close_cf  = request.security(syminfo.tickerid, tf2, close[1], lookahead=barmerge.lookahead_on)
+float h_top_cf    = request.security(syminfo.tickerid, tf2, math.max(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[26], lookahead=barmerge.lookahead_on)
+float h_bot_cf    = request.security(syminfo.tickerid, tf2, math.min(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[26], lookahead=barmerge.lookahead_on)
+float h_close = above2 ? h_close_cf : h_close_cur
+float h_top   = above2 ? h_top_cf : h_top_cur
+float h_bot   = above2 ? h_bot_cf : h_bot_cur
 color h_col   = h_close > h_top ? color.green : h_close < h_bot ? color.red : color.yellow
 
 // ─────────────────────────────────────────────
 // 10 MIN
 // ─────────────────────────────────────────────
-float t_close = request.security(syminfo.tickerid, tf3, close)
-float t_top   = request.security(syminfo.tickerid, tf3, math.max(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
-float t_bot   = request.security(syminfo.tickerid, tf3, math.min(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+float t_close_cur = request.security(syminfo.tickerid, tf3, close)
+float t_top_cur   = request.security(syminfo.tickerid, tf3, math.max(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+float t_bot_cur   = request.security(syminfo.tickerid, tf3, math.min(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+float t_close_cf  = request.security(syminfo.tickerid, tf3, close[1], lookahead=barmerge.lookahead_on)
+float t_top_cf    = request.security(syminfo.tickerid, tf3, math.max(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[26], lookahead=barmerge.lookahead_on)
+float t_bot_cf    = request.security(syminfo.tickerid, tf3, math.min(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[26], lookahead=barmerge.lookahead_on)
+float t_close = above3 ? t_close_cf : t_close_cur
+float t_top   = above3 ? t_top_cf : t_top_cur
+float t_bot   = above3 ? t_bot_cf : t_bot_cur
 color t_col   = t_close > t_top ? color.green : t_close < t_bot ? color.red : color.yellow
 
 // ─────────────────────────────────────────────
 // 1 MIN
 // ─────────────────────────────────────────────
-float m_close = request.security(syminfo.tickerid, tf4, close)
-float m_top   = request.security(syminfo.tickerid, tf4, math.max(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
-float m_bot   = request.security(syminfo.tickerid, tf4, math.min(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+float m_close_cur = request.security(syminfo.tickerid, tf4, close)
+float m_top_cur   = request.security(syminfo.tickerid, tf4, math.max(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+float m_bot_cur   = request.security(syminfo.tickerid, tf4, math.min(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[25])
+float m_close_cf  = request.security(syminfo.tickerid, tf4, close[1], lookahead=barmerge.lookahead_on)
+float m_top_cf    = request.security(syminfo.tickerid, tf4, math.max(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[26], lookahead=barmerge.lookahead_on)
+float m_bot_cf    = request.security(syminfo.tickerid, tf4, math.min(((ta.highest(high, 9) + ta.lowest(low, 9)) / 2 + (ta.highest(high, 26) + ta.lowest(low, 26)) / 2) / 2, (ta.highest(high, 52) + ta.lowest(low, 52)) / 2)[26], lookahead=barmerge.lookahead_on)
+float m_close = above4 ? m_close_cf : m_close_cur
+float m_top   = above4 ? m_top_cf : m_top_cur
+float m_bot   = above4 ? m_bot_cf : m_bot_cur
 color m_col   = m_close > m_top ? color.green : m_close < m_bot ? color.red : color.yellow
 
 // ─────────────────────────────────────────────
-// ALIGNMENT DETECTION — reads d_col/h_col/t_col/m_col + show1..4 only.
-// A row with any na value (close/top/bot) breaks alignment.
+// ALIGNMENT DETECTION — unchanged rules, except rows BELOW chart TF are excluded
+// (they neither count as aligned nor block; the >=2 rule counts participating rows).
+// A participating row with any na value (close/top/bot) still breaks alignment.
 // State latches on confirmed bars only (no intrabar repaint).
 // ─────────────────────────────────────────────
 bool v1 = not na(d_close) and not na(d_top) and not na(d_bot)
 bool v2 = not na(h_close) and not na(h_top) and not na(h_bot)
 bool v3 = not na(t_close) and not na(t_top) and not na(t_bot)
 bool v4 = not na(m_close) and not na(m_top) and not na(m_bot)
-bool bullRaw = rowCount >= 2 and (not show1 or (v1 and d_col == color.green)) and (not show2 or (v2 and h_col == color.green)) and (not show3 or (v3 and t_col == color.green)) and (not show4 or (v4 and m_col == color.green))
-bool bearRaw = rowCount >= 2 and (not show1 or (v1 and d_col == color.red)) and (not show2 or (v2 and h_col == color.red)) and (not show3 or (v3 and t_col == color.red)) and (not show4 or (v4 and m_col == color.red))
+bool p1 = show1 and not below1
+bool p2 = show2 and not below2
+bool p3 = show3 and not below3
+bool p4 = show4 and not below4
+int alignCount = (p1 ? 1 : 0) + (p2 ? 1 : 0) + (p3 ? 1 : 0) + (p4 ? 1 : 0)
+bool bullRaw = alignCount >= 2 and (not p1 or (v1 and d_col == color.green)) and (not p2 or (v2 and h_col == color.green)) and (not p3 or (v3 and t_col == color.green)) and (not p4 or (v4 and m_col == color.green))
+bool bearRaw = alignCount >= 2 and (not p1 or (v1 and d_col == color.red)) and (not p2 or (v2 and h_col == color.red)) and (not p3 or (v3 and t_col == color.red)) and (not p4 or (v4 and m_col == color.red))
 var bool bullishAligned = false
 var bool bearishAligned = false
 bullishAligned := barstate.isconfirmed ? bullRaw : bullishAligned[1]
@@ -173,17 +221,18 @@ if alignEnd and showEnd
 
 // ─────────────────────────────────────────────
 // PLOTS — transparent scale anchors at fixed 0 and 5 (counted in auto-scale),
-// enabled rows placed between them per "Row position"
+// enabled rows placed between them per "Row position".
+// Rows below the chart TF draw no dots (their label shows "n/a" instead).
 // ─────────────────────────────────────────────
 plot(0, "Scale anchor low",  color=color.new(color.black, 100))
 plot(5, "Scale anchor high", color=color.new(color.black, 100))
-plot(slot1, "Daily",  color=d_col, linewidth=10, style=plot.style_circles)
-plot(slot2, "Hourly", color=h_col, linewidth=10, style=plot.style_circles)
-plot(slot3, "10 Min", color=t_col, linewidth=10, style=plot.style_circles)
-plot(slot4, "1 Min",  color=m_col, linewidth=10, style=plot.style_circles)
+plot(below1 ? na : slot1, "Daily",  color=d_col, linewidth=10, style=plot.style_circles)
+plot(below2 ? na : slot2, "Hourly", color=h_col, linewidth=10, style=plot.style_circles)
+plot(below3 ? na : slot3, "10 Min", color=t_col, linewidth=10, style=plot.style_circles)
+plot(below4 ? na : slot4, "1 Min",  color=m_col, linewidth=10, style=plot.style_circles)
 
 // ─────────────────────────────────────────────
-// LABELS
+// LABELS — below-chart-TF rows show "n/a" in gray at their slot
 // ─────────────────────────────────────────────
 var label ld = na
 var label lh = na
@@ -194,10 +243,10 @@ label.delete(lh)
 label.delete(lt)
 label.delete(lm)
 if show1
-    ld := label.new(bar_index, slot1, lbl1, style=label.style_label_left, color=color.new(color.black,100), textcolor=d_col, size=labelSize)
+    ld := label.new(bar_index, slot1, below1 ? lbl1 + " n/a" : lbl1, style=label.style_label_left, color=color.new(color.black,100), textcolor=below1 ? color.gray : d_col, size=labelSize)
 if show2
-    lh := label.new(bar_index, slot2, lbl2, style=label.style_label_left, color=color.new(color.black,100), textcolor=h_col, size=labelSize)
+    lh := label.new(bar_index, slot2, below2 ? lbl2 + " n/a" : lbl2, style=label.style_label_left, color=color.new(color.black,100), textcolor=below2 ? color.gray : h_col, size=labelSize)
 if show3
-    lt := label.new(bar_index, slot3, lbl3, style=label.style_label_left, color=color.new(color.black,100), textcolor=t_col, size=labelSize)
+    lt := label.new(bar_index, slot3, below3 ? lbl3 + " n/a" : lbl3, style=label.style_label_left, color=color.new(color.black,100), textcolor=below3 ? color.gray : t_col, size=labelSize)
 if show4
-    lm := label.new(bar_index, slot4, lbl4, style=label.style_label_left, color=color.new(color.black,100), textcolor=m_col, size=labelSize)
+    lm := label.new(bar_index, slot4, below4 ? lbl4 + " n/a" : lbl4, style=label.style_label_left, color=color.new(color.black,100), textcolor=below4 ? color.gray : m_col, size=labelSize)
