@@ -1,0 +1,1379 @@
+//@version=6
+// ============================================================================
+// Hubert Senters - ORBS Trader — Opening Range Breakout System (strategy
+// conversion of the ORBS Edge indicator, Stage 9d production build).
+// ============================================================================
+// STRATEGY CONVERSION NOTES (this pass — everything else byte-preserved):
+//   - indicator() → strategy(): overlay unchanged; initial_capital 100000;
+//     default_qty = fixed 1 (per-trade qty is the input below, which overrides
+//     it); pyramiding 0; margin_long/margin_short = 0 (futures-safe — the
+//     recorded v6 margin lesson: default 100% margin silently skips NQ trades
+//     on modest capital); process_orders_on_close = true so market entries
+//     fill at the FIRE BAR's CLOSE, matching the engine's bar-close decision
+//     point.
+//   - FILL MODEL (stated limitation): the detection engine is untouched and
+//     still computes the theoretical entry price (trigger level / edge /
+//     retrace level, gap fills at open) for its labels and dashboard. The
+//     BACKTEST, however, enters at MARKET on the fire bar (= that bar's close
+//     via process_orders_on_close). With the default 'Close beyond' break
+//     type the two are close; with 'Trade through' or Retrace-Touch the
+//     engine's level price can be better than the backtest's close fill —
+//     the backtest is the CONSERVATIVE one. Resting-limit order emulation
+//     for Retrace-Touch is a V2 upgrade.
+//   - EXITS (new — the indicator drew levels only): strategy.exit wires the
+//     Stage-4 stop and Stage-5 targets to real orders. Two modes: 'Single
+//     target' = 100% out at the selected TP (default TP1), stop on the rest;
+//     'Scale out' = 25% at each of TP1–TP4, shared stop. Scale-out needs a
+//     per-trade quantity divisible by 4 (25% of 1 contract rounds to 0 and
+//     the exits won't fill).
+//   - STOP GUARD (behavior change, deliberate): a Stage-4 guard rejection
+//     (wrong-side stop / R < 1 tick) now SKIPS THE TRADE ENTIRELY — a
+//     strategy must never hold an unprotected position. The ⚠ label says
+//     "trade skipped". In the indicator the entry still "fired" display-only.
+//   - TIME EXIT default flipped OFF → ON (1500 unchanged): a strategy with
+//     no time-based exit holds through the overnight session whenever neither
+//     stop nor target is hit, which poisons an intraday ORB backtest. At the
+//     exit bar: strategy.cancel_all + strategy.close_all (fills at that
+//     bar's close). Turn it off knowingly if you want overnight holds.
+//   - REVERSALS: pyramiding 0 — if the opposite side fires while a position
+//     is open (both-fired days, direction 'Both'), strategy.entry reverses
+//     in one order: the old position closes and the new one opens at the
+//     same fill. The old side's resting exits auto-cancel.
+//   - DASHBOARD: Position row now reads the REAL position
+//     (strategy.position_size): LONG/SHORT while open, "closed" after the
+//     strategy exits, FLAT when that side never fired. TP-hit rows unchanged
+//     (touch-tracking — they latch even after the position is closed, which
+//     is the point: they grade the levels, not the fills).
+//   - Commission and slippage are left at 0 — set them per instrument in
+//     the strategy Properties tab (NQ: cash-per-contract works well).
+//   - TRADE DIRECTION (strategy revision): moved to its OWN GROUP at the very
+//     top of the settings window (Pine orders groups by first appearance) and
+//     default flipped Both → LONG ONLY. The 9b v4 master-gate semantics are
+//     unchanged — the suppressed side never detects, counts, arms, fires,
+//     orders, or draws; dashboard drops to 2 columns in single-direction
+//     modes. Set 'Both' to restore two-sided trading (with reversals).
+//   - OPENING RANGE INPUTS (strategy revision, supersedes Stage 1fix's four
+//     spinners): ONE HHMM box per endpoint — "Range start (HHMM)" 930 ·
+//     "Range end (HHMM)" 1000. Hour/minute are DERIVED (÷100 / %100) into the
+//     same four values the spinners provided, feeding the same f_hhmm →
+//     "HHMM-HHMM" → time() spine — defaults still assemble the byte-identical
+//     "0930-1000". Trade-off vs the spinners: a single box CAN encode an
+//     invalid minute (975), so minute validation returns (minutes 00-59,
+//     folded into rangeOk; hour is still structurally capped by maxval 2359).
+//     Invalid minutes or start == end → loud ⚠ + detection disabled, never a
+//     silent guess. Midnight-cross windows still work (start 2300, end 30).
+//     This also matches exitTime's HHMM convention.
+//   - TIME-EXIT INPUTS RELOCATED (settings layout only): "Use time exit" +
+//     "Exit time (HHMM)" moved from group Targets → group OPENING RANGE,
+//     directly below Opening Range End Time — all the day's clock times now
+//     live in one place. Variables, defaults, and the time-exit engine are
+//     untouched. (Input titles "Opening Range Start/End Time" per Rick's
+//     field-label revision.) FOLLOW-UP REVISION 2 (supersedes the inline
+//     checkbox row): inline rows anchor LEFT in TradingView's dialog and
+//     CANNOT be aligned with the right-aligned standalone fields — a hard
+//     layout limitation. So the checkbox is ELIMINATED: "Exit Time (0 = off)"
+//     is now ONE input.int in the same HHMM convention as the range times —
+//     one row, perfectly aligned, 0 replaces the unchecked state. useTimeExit
+//     is DERIVED (exitTimeIn > 0 and minutes valid), so the entire downstream
+//     engine is untouched; the "HHMM-HHMM" string for time() is assembled via
+//     the same f_hhmm. Invalid exit minutes (e.g. 1575) → loud ⚠ + exit OFF,
+//     never a silent guess. Accepted edge: 0 doubles as midnight, so an
+//     exactly-midnight flatten isn't expressible (use 1 or 2359) — stated in
+//     the tooltip.
+//   - BUGFIX — STOP EXITED AT THE WRONG (NEXT TRADE'S) LEVEL: with a position
+//     still open when a new same-direction signal fired, pyramiding = 0
+//     silently DROPPED the new strategy.entry, but the re-issued
+//     strategy.exit (same order ID) MODIFIED the live exit — the open
+//     position's stop/target were silently moved to the new trade's levels,
+//     so price traded through the original SL without exiting and the trade
+//     died at the NEXT signal's stop instead (field-reported on NQ, ETH
+//     chart). FIX (as revised): POSITION-OPEN GATE on the ORDER LAYER ONLY —
+//     a same-direction fire while positioned becomes a silent PAPER FIRE:
+//     the chart still draws everything (entry marker, SL line, all four TP
+//     levels, dashboard, TP-hit tracking) exactly as the indicator did, but
+//     NO strategy.entry is sent and critically NO strategy.exit is re-issued,
+//     so the live position's stop/targets are never touched. No ⊘ label (a
+//     visible block marker was tried and removed per Rick). Opposite-
+//     direction fires still reverse by design (fresh exits then correctly
+//     govern the new position). One live position, one live stop, always —
+//     while the chart remains a complete signal record. Note the resulting
+//     display-vs-fills split: a paper fire's drawn SL/TP are the SIGNAL's
+//     levels, not live orders; the Strategy Tester only reflects the real
+//     position's exits.
+//   - SETTINGS SIMPLIFICATION PASS (per Rick): (a) Exit Time default 0 = OFF
+//     (was 1500 ON — flipping the earlier strategy default back; positions
+//     without stop/target hits now hold overnight by default, stated in the
+//     tooltip). (b) Three checkbox+value PAIRS collapsed into single 0 = off
+//     fields, matching the Exit Time convention: "Buffer (% of range,
+//     0 = off)" default 0 · "Min bars outside (0 = off)" default 0 (1 ≡ 0) ·
+//     "Armed timeout (bars, 0 = off)" default 0 (useArmTimeout is now
+//     DERIVED = armTimeoutBars > 0; buffer/min-bars fold arithmetically:
+//     0% buffer = 0 cushion, needed = max(minBars, 1)). Note the old pairs
+//     defaulted the VALUES to 10% / 2 / 12 with the toggle off — the merged
+//     fields default to 0, so a user enabling the filter now also chooses
+//     its size (deliberate: one number, one meaning). (c) The five drawing
+//     toggles (stop/target lines · stop label · target labels · entry label ·
+//     line prices) REMOVED from the dialog and hardcoded ON — Rick flagged
+//     them as reading like duplicates of the Style tab; variables kept as
+//     constants so the gates are untouched and any toggle is one line to
+//     restore. [ADOPTION REVISION: the five toggles are restored as inputs
+//     below, defaults ON; the "· stopped" dashboard flag is restored; Exit
+//     Time and Min bars outside defaults set to 0 = off per the tooltips;
+//     Show VWAP display default OFF (filter was already off); range end
+//     default 0935 (default window 0930-0935, superseding "0930-1000" notes
+//     below); every input carries display = display.none so the status line
+//     shows only the strategy name — inputs all remain in Settings.]
+//   - STOP GROUP GRAYING (per Rick): the four stop-parameter fields now use
+//     Pine v6's `active` input parameter, keyed to the Stop type dropdown —
+//     only the selected type's field(s) are editable; the rest render grayed
+//     out. Full range = all four grayed · % of range = Stop % only · % ATR =
+//     ATR length + multiplier · Ticks = tick distance · Dollar risk = dollar
+//     field. Display-dialog behavior only; values and engine unchanged.
+//     EXTENDED (per Rick): "Retrace % (into box)" + "Retrace fill" now gray
+//     out unless Entry timing = 'Retrace'. Also "Recent lookback (trades)"
+//     grays out unless Show trades = 'Recent window', and the Show trades
+//     DEFAULT flipped Recent window → ALL (reverses the Stage-9d declutter
+//     default for the strategy — full trade history visible out of the box,
+//     which suits backtest review). The same pattern remains available
+//     for the volume-filter fields and exit target on request.
+// ============================================================================
+// ORB V1 — Stage 9b: PRICE LABELS ON LEVEL LINES (order-placement readout)
+//   - "Show line prices" (group Display, default ON — the point is reading
+//     exact prices off the lines): a small price tag on the ORB HIGH line,
+//     ORB LOW line, and the RETRACE level line (when armed, Retrace mode).
+//     Text = format.mintick, the same convention as every SL/TP/entry label
+//     (ZB/ZC caveat unchanged: fractional-tick text renders coarsely — the
+//     recorded PDH/PDL lesson; data window holds exact decimals; a native
+//     32nds text formatter is a docs/V2 note). signalTextSize sized.
+//   - TAGS ONLY ON UNLABELED LINES (9b fix v2/v3): the ORB high line, ORB low
+//     line, and retrace level line — the lines with NO price label of their
+//     own. SL/TP lines already carry their price in their own labels
+//     ("SL 323.45", "TP1 @ ...") and get NO tag. v3 closes the coincidence
+//     hole: when a trade's SL or TP lands EXACTLY on an ORB edge (Full-range
+//     stop == ORB edge — the norm), that edge's yellow tag is SUPPRESSED,
+//     because the SL/TP label now labels that price line — one label per
+//     line, always. If the claiming label family is toggled off (below), the
+//     tag stays (the line would otherwise be unlabeled).
+//   - GRANULAR LABEL TOGGLES (9b v3, group Display, ALL default ON): "Show
+//     stop label" (the SL text) · "Show target labels" (TP1..TP4 texts) ·
+//     "Show entry label" (the entry callout — composes with Break marker
+//     style) · "Show line prices" (the yellow ORB/retrace tags). Each hides
+//     ONLY its text family; the LINES stay (showLevels remains the master
+//     for the lines themselves). All compose with showSignals + Show trades.
+//   - STAGGER: existing labels SL +0, TP1..TP4 +2/+4/+6/+8 · ORB high/low
+//     tags +22 · retrace tag +26 — tags sit well clear of the widest label
+//     text even when prices coincide (Full-range SL == an ORB edge is the
+//     norm, not the exception).
+//   - SCOPE: ORB high/low tags are PER-DAY artifacts (follow the range lines,
+//     NOT the per-trade declutter); the retrace tag is PER-TRADE (pushed into
+//     its TradeVis unit → Show trades hides it with its trade). OFF = no
+//     line tags (prior behavior). Display-only; zero logic change; labels
+//     cost no plot slots (still 60/64).
+//   - STANDING-RULE REVISION (9b): signalTextSize AND dashTextSize defaults
+//     changed Large → NORMAL (all five sizes still offered).
+//   - TRADE DIRECTION (9b v4): "Trade direction" (Both [default] / Long only
+//     / Short only) — a MASTER GATE at the root of the engine (gates the
+//     beyond-detection itself), so the suppressed side never detects, counts,
+//     arms, FIRES, or draws — a real trade filter, not hiding. Composes with
+//     everything downstream. SHARED artifacts always stay: range box, ORB
+//     high/low lines + tags, VWAP, dashboard Box row. The dashboard drops to
+//     a clean 2-column layout in single-direction modes.
+// Stage 1fix notes retained:
+// ORB V1 — Stage 1fix: MINUTE-PRECISE RANGE WINDOW (Stage-1 revision)
+//   - input.session's picker widget only steps in 15-minute increments, so it
+//     is REPLACED by four SPINNER fields (input.int with up/down arrows):
+//     Range start hour (default 9) + minute (30), Range end hour (10) +
+//     minute (0). Each is zero-padded and assembled into the SAME "HHMM-HHMM"
+//     string the time() engine has consumed since Stage 1 — the detection
+//     line, session edges, box capture, and freeze logic are all unchanged;
+//     only the string's SOURCE changes. Midnight-cross windows (e.g. start
+//     23:00, end 00:30) still work. Default assembly 9/30 + 10/0 → the
+//     byte-identical "0930-1000" — no verification anchor moves.
+//   - STRUCTURAL SAFETY: minval/maxval (hour 0-23, minute 0-59) makes
+//     malformed times IMPOSSIBLE to enter — no string validation needed. The
+//     one surviving degenerate case is start == end (zero-width window): it
+//     shows a loud ⚠ label and detection is disabled (no range, no box, no
+//     trades) — never a silent guess. exitTime is deliberately UNTOUCHED this
+//     pass (its own typed field; spinner-izing it is a separate decision).
+//   - DIVISOR CAVEAT (accepted Section-1 limitation, unchanged): minute
+//     precision fully lands on a 1-minute chart; on 5m/15m/30m the window
+//     quantizes to chart-bar boundaries (a 09:47 end on a 5m chart includes
+//     the 09:45 bar). Stated in the tooltips.
+// Stage 9a notes retained:
+// ORB V1 — Stage 9a: TRADE DISPLAY MODE (display-pass declutter)
+//   - "Show trades" (group Display): All · Most recent only · Recent window
+//     ("Recent lookback", TRADE COUNT, default 3 — "last N trades"; bar-count
+//     alt = V2). DEFAULT REVISED at Stage 9d: Recent window / 3 — the chart
+//     opens decluttered (current trade + 2 back); "All" restores full history.
+//   - Filter unit = the SETUP/TRADE INSTANCE: break arrow + armed line +
+//     entry label + stop/TP lines & labels + its cancel/⊘/⚠ markers, tracked
+//     in a chronological registry (UDT TradeVis). Windowed modes keep the
+//     last N FIRED trades PLUS any live armed setup (current info isn't
+//     clutter); cancelled/blocked setups show only in "All". Dashboard and
+//     TIME EXIT marker are NOT filtered. DISPLAY ONLY — hiding is done by
+//     making colors transparent (never deletion, so extension loops stay
+//     safe); entries/stops/targets COMPUTE identically in every mode.
+//   - Break arrows converted plotshape → LABELS (a historical plotshape can
+//     never be hidden retroactively; labels can). Plot outputs drop to 60/64.
+//   - "Break marker style" (group Display, default TRIANGLE): Triangle =
+//     small clean colored triangle at the BREAK bar, no text (the original
+//     plotshape look, as a hideable label) · Label = the "LONG @ price"
+//     callout at the ENTRY bar · Both = triangle + callout. All three respect
+//     Show trades and showSignals; callout text = signalTextSize. Note: the
+//     "(gap fill)" tag lives on the callout — Triangle mode shows price via
+//     the dashboard instead. Cancel/⊘/⚠ status marks are unaffected.
+// Stage 8 notes retained:
+// ORB V1 — Stage 8: SIMPLIFIED DASHBOARD (spec Section 7) — built LAST
+//   - Two-column LONG | SHORT table (both sides always shown; both-fired days
+//     populate both). READS already-computed engine state — zero new trade
+//     logic. Rows: Box (forming/complete/none) · Status (armed/fired/none) ·
+//     Position (LONG/SHORT/FLAT, "· stopped" appended once price trades
+//     through that side's stop) · Entry · Stop ("—" when none or guard-
+//     rejected) · TP1–TP4 hit flags ("✓ px" hit / "· px" waiting / "—" none).
+//   - TP-hit + ·stopped tracking: starts the bar AFTER fire (the fire bar
+//     itself never counts), TOUCH semantics (high >= TP / low <= TP; stop:
+//     low <= SL long / high >= SL short), flags LATCH, and the time-exit
+//     window gates tracking (a touch at/after flatten time doesn't flip).
+//     Display-only — no exits, no P&L (V2).
+//   - Inputs (group "Dashboard"): Show dashboard (default ON) · position
+//     (6 spots) · Dashboard text size (dashTextSize, default LARGE — the
+//     standing readability rule's second half, now live).
+//   - PLOT CAP: tables cost no plot slots — still 62/64; the table text is
+//     itself machine-readable, so no new debug plots either.
+// Stage 7 notes retained:
+// ORB V1 — Stage 7: VOLUME-CONFIRMED BREAKOUTS (spec Section 6)
+//   - "Require volume confirmation" (default OFF): a break is confirmed only
+//     when the RUN-INITIATING bar's volume > (PRIOR-bar SMA over N bars) ×
+//     multiplier — the break bar is excluded from its own benchmark. GATES
+//     THE BREAK (inside Pass-1 confirmation), NOT the fire: a weak break is
+//     never counted, so Dial 2 counts only volume-confirmed breaks. Only the
+//     initiating bar needs the surge (min-bars continuation bars don't).
+//     LATE-VOLUME RECOGNITION: a weak poke followed by a still-beyond bar
+//     WITH volume starts the run there (bar boundaries are arbitrary).
+//   - "Show volume-filtered breaks" (default OFF): tiny ~50%-transparent gray
+//     CIRCLE at the trigger level on blocked-start bars — via LABELS (labels
+//     don't count toward the plot cap; label styles have no hollow circle, so
+//     faint-filled stands in — same visually-secondary intent). Independent
+//     of showSignals.
+//   - Instrument note: all 8 validation symbols carry real exchange volume;
+//     synthetic-volume symbols (cash indices, forex CFDs) should keep this
+//     filter off (warned in the tooltip).
+// Stage 6 notes retained:
+// ORB V1 — Stage 6: VWAP DISPLAY + VWAP TREND FILTER (spec Section 5)
+//   - Show VWAP (group "VWAP", default ON): DISPLAY ONLY — the calc
+//     (ta.vwap(hlc3), spine-identical) runs every bar regardless; the toggle
+//     gates visibility via plot COLOR so the value stays readable in the
+//     Data Window even when hidden.
+//   - VWAP trend filter (group "Filters", default OFF): a FINAL GATE at the
+//     fire moment, orthogonal to all three dials. Long allowed only if the
+//     fire bar CLOSES above VWAP; short only below. Strict inequality (tie =
+//     blocked). Block = TERMINAL CANCEL (cancel reason 4 = VWAP; the side is
+//     done for the day — no lingering armed state; no stop/targets), with a
+//     ⊘ "Blocked: VWAP" label at the blocked fire bar (signalTextSize).
+//   - INDEPENDENCE: display toggle and filter are fully independent — all
+//     four combinations valid; the filter works with the line hidden.
+// Stage 5 notes retained:
+// ORB V1 — Stage 5: TARGETS (spec Section 4) — 4 × editable R-multiples + time exit
+//   - TP1–TP4 = entry ± rrN × R (defaults 1/2/3/5, independent floats).
+//     Targets are drawn ONLY when Stage 4's guard accepted the stop (no R →
+//     no targets). Green dotted lines + "TPn @ price" labels, FIXED-SLOT
+//     stagger. Coincident levels drawn truthfully, never nudged.
+//   - TIME EXIT: toggle + typed HHMM in sessionTz. At the exit bar: dashed
+//     vertical "TIME EXIT" marker (only when a trade is armed/fired at that
+//     moment; behind showLevels), armed setups CANCEL (reason 3, cancel-first
+//     on the exit bar), the entry engine gates (no new breaks/arms/fires),
+//     and stop/target lines stop extending. STRATEGY: now also flattens.
+// Stage 4 notes retained:
+// ORB V1 — Stage 4: STOP ENGINE (spec Section 3) — 5 selectable types → R
+// Consumes the entry contract {side, entryPrice, entryBar}; produces the STOP
+// PRICE and R = |entry − stop| that Stage 5's targets multiply.
+//   - Stop types: Full range / % of range (STRUCTURAL — anchored to the BOX,
+//     R varies with entry; retrace entries → smaller R) · % ATR / Ticks /
+//     Dollar risk (ENTRY-anchored distances). ATR frozen at the fire bar.
+//     All computed ONCE on the fire bar, then static (no trailing in V1).
+//   - WRONG-SIDE / MIN-R GUARD (§3.4): stop on the wrong side of entry or
+//     R < 1 tick → REJECT LOUDLY (strategy: trade SKIPPED). Never clamp,
+//     never auto-fix.
+// Prior stages (S1 range, S2 breaks, S3a Dial 2, S3b Dial 3 complete entry
+// engine) UNCHANGED. Stage 3b-iii notes retained below:
+//   - RETRACE: level = raw edge ∓ retracePct×range; Touch = resting-limit
+//     fill at the level; Confirmed = touch then Dial-1 re-cross (retest
+//     machinery at the level). Option-B same-bar gate; fill-before-invalidation.
+//   - INVALIDATION (terminal, one-shot): opposite raw-edge close · day end ·
+//     optional armed timeout (arm+N). Gray ✕ cancel label with reason.
+//   - STANDING RULE: signalTextSize governs entry labels + all cancel markers.
+// ============================================================================
+
+strategy("Hubert Senters - ORBS Trader", shorttitle = "Hubert Senters - ORBS Trader", overlay = true, max_lines_count = 500, max_boxes_count = 500, max_labels_count = 500, initial_capital = 100000, default_qty_type = strategy.fixed, default_qty_value = 1, pyramiding = 0, process_orders_on_close = true, calc_on_every_tick = false, margin_long = 0, margin_short = 0)
+
+// --- Inputs: Trade Direction (moved to the TOP of the settings window; strategy
+// default = Long only) -----------------------------------------------------------
+tradeDir = input.string("Long only", "Trade direction", options = ["Both", "Long only", "Short only"], group = "Trade Direction", tooltip = "Which direction(s) the strategy trades. 'Long only' (default) = the short side is fully OFF — no short signals, entries, orders, levels, or dashboard column; a breakdown below the range is simply ignored. 'Short only' = the mirror. 'Both' = breakouts above AND below the range. This is a real trade filter (the suppressed side never fires), not just hiding. The range box, ORB lines, and VWAP always stay — they're shared context. NOTE: in 'Both' mode, if the opposite side fires while a position is open, the strategy REVERSES (closes and flips in one order).", display = display.none)
+
+// --- Inputs: Opening Range (strategy revision: single HHMM box per endpoint) ------
+rangeStart = input.int(930, "Opening Range Start Time", minval = 0, maxval = 2359, group = "Opening Range", tooltip = "Start of the opening range as one 24-hour HHMM number, in the timezone selected below. 930 = 9:30am, 1830 = 6:30pm, 0 = midnight. Any minute works (932, 947...), not just quarter-hours. Minutes must be 00-59 — e.g. 975 is invalid and shows a warning. NOTE: minute precision is fully realized on a 1-minute chart; on a 5m/15m/30m chart the window rounds to that chart's bar boundaries.", display = display.none)
+rangeEnd   = input.int(935, "Opening Range End Time", minval = 0, maxval = 2359, group = "Opening Range", tooltip = "End of the opening range as one 24-hour HHMM number. 1000 = 10:00am, 1500 = 3pm. Windows that cross midnight are supported (e.g. start 2300, end 30). Start and end must differ — a zero-width window shows a warning and disables the range. Same bar-boundary note as the start: on a 5m chart a 947 end includes the whole 09:45 bar.", display = display.none)
+exitTimeIn = input.int(0, "Exit Time (0 = off)", minval = 0, maxval = 2359, group = "Opening Range", tooltip = "DEFAULT: 0 = time exit OFF. To enable, type a 24-hour HHMM number, same format and timezone as the range times above (1400 = 2pm, 1500 = 3pm, 1600 = 4pm NY). At that time: any open position is CLOSED at market (fill = that bar's close), all resting orders are cancelled, any waiting (armed) setup is cancelled, and no new entries are taken for the rest of the day. Note that with this OFF, a trade that never hits stop or target holds through the overnight session. (0 doubles as midnight, so an exactly-midnight flatten isn't expressible — use 1 or 2359. Minutes must be 00-59.)", display = display.none)
+
+// Derive + validate the exit time exactly like the range times (0 = feature
+// off, replacing the old checkbox; invalid minutes → loud ⚠, exit treated
+// as off, never a silent guess).
+exitH  = math.floor(exitTimeIn / 100)
+exitM  = exitTimeIn % 100
+exitOk = exitTimeIn == 0 or exitM <= 59
+useTimeExit = exitTimeIn > 0 and exitM <= 59
+sessionTz  = input.string("America/New_York", "Timezone", options = ["America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "UTC"], group = "Opening Range", tooltip = "Timezone the window above is read in. US equities and most US futures: America/New_York. Crypto convention: UTC. Daylight-saving shifts are handled automatically because these are region names, not fixed UTC offsets.", display = display.none)
+
+// Derive hour/minute from the HHMM boxes — everything downstream (f_hhmm
+// assembly, the time() engine, the warning label) consumes the SAME four
+// values the spinners used to provide, so no verification anchor moves.
+rangeStartH = math.floor(rangeStart / 100)
+rangeStartM = rangeStart % 100
+rangeEndH   = math.floor(rangeEnd / 100)
+rangeEndM   = rangeEnd % 100
+
+// --- Inputs: Entry Engine — Break Detection ------------------------------------
+breakType      = input.string("Close beyond", "Break type", options = ["Trade through", "Close beyond"], group = "Entry Engine — Break Detection", tooltip = "How a breakout of the range is detected. 'Close beyond' = the bar must CLOSE outside the range level (calmer, filters wick fake-outs — the classic ORB definition). 'Trade through' = any intrabar move beyond the level counts, even if the bar closes back inside (faster, more aggressive). Applies symmetrically: above the range high for longs, below the range low for shorts. Also governs the Retest re-cross. STRATEGY NOTE: backtest entries fill at the fire bar's CLOSE — with 'Trade through' that close can sit back inside the range, away from the trigger level.", display = display.none)
+bufferPct      = input.float(0.0, "Buffer (% of range, 0 = off)", minval = 0, step = 0.5, group = "Entry Engine — Break Detection", tooltip = "DEFAULT: 0 = no buffer (the raw range level itself is the trigger). Set above 0 to require price to clear the range level by an extra cushion before a break counts — filters tiny pokes that barely exceed the level. Sized as a percent of the range height (box high minus box low): a 40-point box with 10 → price must clear the level by 4 extra points. Percent-of-range self-adjusts to each instrument and each day's volatility.", display = display.none)
+minBarsOutside = input.int(0, "Min bars outside (0 = off)", minval = 0, group = "Entry Engine — Break Detection", tooltip = "DEFAULT: 0 = off (the break confirms on the first bar that satisfies the Break type rule). Set to 2+ for the committed-breakout filter: price must satisfy the Break type rule for that many bars in a row before the break is confirmed — filters poke-and-fail moves. The count starts on the first qualifying bar and resets to zero the moment any bar fails the rule. 1 behaves the same as 0.", display = display.none)
+
+// --- Inputs: Entry Engine — Timing --------------------------------------------
+whichBreak     = input.string("Second", "Which break", options = ["First", "Second"], group = "Entry Engine — Timing", tooltip = "Which confirmed breakout to act on, counted per side per day. 'First' = act on the day's first confirmed break of that level (classic ORB). 'Second' = deliberately skip the first break and act on the second — for traders who expect the first breakout to fail and want the re-break. Counted separately for the long side (breaks above) and the short side (breaks below). Note: with 'Require volume confirmation' on, only volume-confirmed breaks are counted — a weak first break doesn't use up the 'First' slot.", display = display.none)
+entryTiming    = input.string("Retest", "Entry timing", options = ["Immediate", "Retest", "Retrace"], group = "Entry Engine — Timing", tooltip = "When to actually enter after the chosen break. 'Immediate' = enter on the break bar itself. 'Retest' = wait for price to come back and touch the range edge, then enter when it resumes in the breakout direction. 'Retrace' = ambush entry — wait for price to pull back INTO the range to the Retrace % level. Pick one; it applies to both sides. STRATEGY NOTE: all modes enter at market on the fire bar (fill = that bar's close); the labels/dashboard still show the engine's theoretical level price.", display = display.none)
+retracePct     = input.float(55.0, "Retrace % (into box)", minval = 0, maxval = 100, step = 5, active = entryTiming == "Retrace", group = "Entry Engine — Timing", tooltip = "Only active when Entry timing = 'Retrace'. How deep into the range price must pull back before the ambush entry fills, measured from the broken edge as a percent of range height. 50 = the middle of the box. 0 = the broken edge itself. 100 = the opposite edge. Example: 40-point box, long break, 50% → entry level is range high minus 20 points.", display = display.none)
+retraceFill    = input.string("Touch", "Retrace fill", options = ["Touch", "Confirmed"], active = entryTiming == "Retrace", group = "Entry Engine — Timing", tooltip = "Only active when Entry timing = 'Retrace'. 'Touch' = pure resting-limit ambush: the entry fires the instant price reaches the retrace level (classic). 'Confirmed' = price must touch or pierce the level AND then trade back through it in the breakout direction before the entry fires — the same touch-then-re-cross logic as Retest, anchored at the retrace level, with the re-cross governed by Break type. Confirmed skips fills where the pullback tags your level and keeps running against the trade.", display = display.none)
+armTimeoutBars = input.int(0, "Armed timeout (bars, 0 = off)", minval = 0, group = "Entry Engine — Timing", tooltip = "DEFAULT: 0 = off (an armed setup lives until it fills, the box fails, or the day ends). Set above 0 to cancel a stale armed Retest/Retrace setup that hasn't filled within this many bars, counted from the breakout (the bar that armed the setup). 12 bars = 1 hour on a 5-min chart, 12 minutes on a 1-min chart.", display = display.none)
+useArmTimeout  = armTimeoutBars > 0
+
+// --- Inputs: Stop (spec §3.1) ---------------------------------------------------
+stopType     = input.string("% of range", "Stop type", options = ["Full range", "% of range", "% ATR", "Ticks", "Dollar risk"], group = "Stop", tooltip = "Where the stop goes, which also sets R (your risk distance) — all four targets are multiples of R. 'Full range' = the opposite side of the range box (the classic ORB stop: if price crosses back through the whole box, the breakout failed). '% of range' = a level inside the box, measured down from the broken edge (50 = box midpoint; 100 = same as Full range). '% ATR' = a volatility-sized distance from your entry. 'Ticks' = a fixed tick count from your entry. 'Dollar risk' = the distance that equals a dollar amount per contract/share. STRATEGY: this is a real stop order (strategy.exit).", display = display.none)
+stopRangePct = input.float(55.0, "Stop: % of range", minval = 5, maxval = 200, step = 5, active = stopType == "% of range", group = "Stop", tooltip = "Only active when Stop type = '% of range'. The stop level sits this percent of the range height INTO the box, measured from the broken edge. 25 = a quarter of the box back, 50 = the midpoint, 100 = the opposite edge (identical to Full range). Values over 100 place the stop beyond the opposite edge. With Retrace entries, keep this DEEPER (larger) than Retrace % or the stop lands on the wrong side of your entry and the trade is skipped.", display = display.none)
+atrLen       = input.int(14, "ATR length", minval = 1, active = stopType == "% ATR", group = "Stop", tooltip = "Only active when Stop type = '% ATR'. How many bars the Average True Range is averaged over. 14 is the standard.", display = display.none)
+atrMult      = input.float(1.5, "ATR multiplier", minval = 0.1, step = 0.1, active = stopType == "% ATR", group = "Stop", tooltip = "Only active when Stop type = '% ATR'. Stop distance = ATR × this multiplier, measured from your entry price. 1.0 = one full ATR; 1.5 gives the trade room for normal noise. The ATR value is read once, on the entry bar, and the stop does not move afterward.", display = display.none)
+stopTicks    = input.int(20, "Stop distance (ticks)", minval = 1, active = stopType == "Ticks", group = "Stop", tooltip = "Only active when Stop type = 'Ticks'. Fixed stop distance from your entry, in ticks — the instrument's minimum price increment, so it adapts automatically: 20 ticks = 5.00 points on /ES (0.25/tick), $0.20 on a stock (0.01/tick), 20/32nds on ZB.", display = display.none)
+riskDollars  = input.float(100.0, "Dollar risk (per contract/share)", minval = 0.01, step = 1, active = stopType == "Dollar risk", group = "Stop", tooltip = "Only active when Stop type = 'Dollar risk'. The stop is placed at the distance where ONE contract (futures) or ONE share (stock) loses this many dollars. Examples: /ES ($50/point) with $100 → 2.00 points; MES ($5/point) with $100 → 20.00 points; a stock with $0.50 → $0.50 per share. Position sizing across multiple contracts is a V2 feature — this is per-unit risk.", display = display.none)
+
+// --- Inputs: Targets (spec §4.1) --------------------------------------------------
+rr1         = input.float(0.6, "Target 1 (R multiple)", minval = 0.1, step = 0.1, group = "Targets", tooltip = "Target 1 as a multiple of R — your entry-to-stop distance. Example: entry 6001, stop 5980 → R = 21 points; a ratio of 1 puts TP1 21 points from entry. Change the stop type or entry and all four targets recalculate automatically.", display = display.none)
+rr2         = input.float(2.0, "Target 2 (R multiple)", minval = 0.1, step = 0.1, group = "Targets", tooltip = "Target 2 as a multiple of R. Fully independent — set any value; it does not need to relate to the other targets.", display = display.none)
+rr3         = input.float(3.0, "Target 3 (R multiple)", minval = 0.1, step = 0.1, group = "Targets", tooltip = "Target 3 as a multiple of R. Fully independent — set any value.", display = display.none)
+rr4         = input.float(5.0, "Target 4 (R multiple)", minval = 0.1, step = 0.1, group = "Targets", tooltip = "Target 4 as a multiple of R. Fully independent — set any value (e.g. 8 for a runner target).", display = display.none)
+
+// --- Inputs: Strategy Execution (strategy conversion) ---------------------------
+tradeQty   = input.int(1, "Contracts / shares per trade", minval = 1, group = "Strategy Execution", tooltip = "Order size for every entry. 'Scale out' exit mode splits the position 25% per target, so use a quantity divisible by 4 (e.g. 4, 8, 20) in that mode — 25% of 1 contract rounds to zero and the partial exits will not fill.", display = display.none)
+exitMode   = input.string("Single target", "Exit mode", options = ["Single target", "Scale out (25% per target)"], group = "Strategy Execution", tooltip = "'Single target' = the whole position exits at the target selected below, with the stop covering everything until then. 'Scale out' = 25% of the position exits at each of TP1, TP2, TP3, TP4; the shared stop covers whatever remains. All four target levels are always drawn either way.", display = display.none)
+exitTarget = input.string("TP1", "Exit target (Single target mode)", options = ["TP1", "TP2", "TP3", "TP4"], group = "Strategy Execution", tooltip = "Only used when Exit mode = 'Single target'. Which of the four R-multiple targets takes the whole position off.", display = display.none)
+
+// --- Inputs: VWAP (spec §5.1) -----------------------------------------------------
+showVWAP = input.bool(false, "Show VWAP", group = "VWAP", tooltip = "Plots the session VWAP (volume-weighted average price) — a common, easy-to-use intraday reference: many traders treat price above VWAP as bullish territory and below as bearish, and it doubles as a widely-watched support/resistance line. Display only. Hiding it does NOT affect the VWAP trend filter, which keeps working either way.", display = display.none)
+
+// --- Inputs: Filters (spec §5.1) ---------------------------------------------------
+useVwapFilter = input.bool(false, "VWAP trend filter", group = "Filters", tooltip = "Only take entries on the VWAP side of the market: longs are allowed only when the entry bar CLOSES above VWAP, shorts only when it closes below. An entry that triggers on the wrong side of VWAP is skipped — marked on the chart — and that side is done for the day. Works even when Show VWAP is off.", display = display.none)
+useVolFilter  = input.bool(false, "Require volume confirmation", group = "Filters", tooltip = "Only count breakouts that come with a volume surge: the bar that starts a break must trade more volume than its recent average (see the two settings below). A break on weak volume is IGNORED — it isn't counted as an occurrence, so with '2nd break' selected the second CONFIRMED break is the trade. If a weak poke is followed by another bar still beyond the level that DOES have the volume, the break confirms on that bar instead (bar boundaries are arbitrary — the surge just has to show up while price holds beyond). Needs real exchange volume: fine on stocks, futures, and crypto; leave OFF on synthetic-volume symbols such as cash indices or forex/CFD feeds.", display = display.none)
+volMult       = input.float(1.3, "Volume multiplier", minval = 0.1, step = 0.1, group = "Filters", tooltip = "Only used when 'Require volume confirmation' is on. How much bigger than average the break bar's volume must be. 1.3 = 30% above average. Higher = stricter (fewer, stronger breakouts); 1.0 = merely above average.", display = display.none)
+volLen        = input.int(20, "Volume avg length", minval = 1, group = "Filters", tooltip = "Only used when 'Require volume confirmation' is on. How many bars the volume average looks back. The average is taken over the bars BEFORE the break bar, so a big break bar can't inflate its own benchmark.", display = display.none)
+showVolBlocks = input.bool(false, "Show volume-filtered breaks", group = "Filters", tooltip = "Only used when 'Require volume confirmation' is on. Marks the breaks that were skipped for weak volume with a small faint gray circle at the trigger level — useful for tuning the multiplier. Off = skipped breaks are silent.", display = display.none)
+
+// --- Inputs: Display (spine carry — relocated/formalized in Sections 5 & 8) ---
+showSignals = input.bool(true, "Show Breakout Arrows", group = "Display", tooltip = "Master switch for the per-trade signal marks: break triangles/entry callouts (per 'Break marker style' below), cancel marks, and blocked-entry marks. Off = a completely quiet chart — only the range box, lines, and (if on) VWAP and dashboard remain. Trades still compute; the dashboard still reports them.", display = display.none)
+breakMarker = input.string("Triangle", "Break marker style", options = ["Triangle", "Label", "Both"], group = "Display", tooltip = "How a breakout/entry is marked. 'Triangle' = a small clean colored triangle at the BREAK bar (green up = long break, red down = short break), no text — the classic minimal look; read the entry price off the dashboard. 'Label' = a text callout at the ENTRY bar showing the engine's level price (and a gap-fill tag when the fill gapped). 'Both' = triangle at the break AND the callout at the entry. All three obey 'Show trades' and the master arrow toggle above. The strategy tester's own entry/exit markers are separate and always shown by TradingView.", display = display.none)
+// Drawing toggles RESTORED as inputs (adoption revision — reverses the
+// hardcode): same five variables, same downstream gates, V1 tooltips,
+// defaults all ON (drawings visible out of the box, each hideable again).
+showLevels  = input.bool(true, "Show stop/target lines", group = "Display", tooltip = "Master switch for the trade-level drawings once an entry fires: the stop line, the four target lines, and the time-exit marker. Display only — turning this off hides the drawings but changes nothing about the logic. The three label toggles below control just the TEXT on those lines.", display = display.none)
+showStopLbl  = input.bool(true, "Show stop label", group = "Display", tooltip = "The 'SL <price>' text on the stop line. Off = the red stop line stays, just without its label.", display = display.none)
+showTpLbls   = input.bool(true, "Show target labels", group = "Display", tooltip = "The 'TP1 @ ...' through 'TP4 @ ...' texts on the target lines. Off = the dotted green target lines stay, just without their labels.", display = display.none)
+showEntryLbl = input.bool(true, "Show entry label", group = "Display", tooltip = "The 'LONG/SHORT @ price' entry callout. Only applies when Break marker style is 'Label' or 'Both' (Triangle mode has no callout to begin with). Off = the trade still marks with its triangle/levels, just no callout text.", display = display.none)
+showLinePrices = input.bool(true, "Show line prices", group = "Display", tooltip = "Puts the exact price on the lines that don't already show one, so you can place orders straight off the chart: tags on the ORB high line, the ORB low line, and — in Retrace mode — the retrace entry level. When a stop or target lands exactly on an ORB edge, that edge's tag steps aside for the SL/TP label — one label per line, always. Sized by 'Signal label size'. Off = clean lines with no price tags.", display = display.none)
+showTrades   = input.string("All", "Show trades", options = ["All", "Most recent only", "Recent window"], group = "Display", tooltip = "Declutter control for the per-trade drawings (arrows, entry labels, stop/target lines, armed lines, cancel marks). 'All' (default) = every trade on the chart, nothing hidden (best for reviewing history). 'Recent window' = the last N trades (N below) for a decluttered chart. 'Most recent only' = just the latest trade. A setup that is still ARMED and waiting always shows — it's live information. Cancelled or blocked setups are shown only in 'All'. The dashboard is a separate status panel and is never filtered. Display only — every trade still computes and trades identically.", display = display.none)
+recentTrades = input.int(3, "Recent lookback (trades)", minval = 1, active = showTrades == "Recent window", group = "Display", tooltip = "Only active when Show trades = 'Recent window'. How many of the most recent trades to keep on the chart — 'the past 3 trades' style decluttering. Counted in TRADES, not bars, so quiet days don't eat the window.", display = display.none)
+
+// --- Inputs: Dashboard (spec §7.1) ----------------------------------------------
+showDash     = input.bool(true, "Show dashboard", group = "Dashboard", tooltip = "On-chart status table: box status, per-side entry status, live position, entry/stop prices, and which targets price has reached so far today. Display only. Off = no table.", display = display.none)
+dashPos      = input.string("Top right", "Dashboard position", options = ["Top left", "Top center", "Top right", "Bottom left", "Bottom center", "Bottom right"], group = "Dashboard", tooltip = "Corner or edge of the chart where the dashboard sits. Move it if it covers price action you want to see.", display = display.none)
+dashTextSize = input.string("Normal", "Dashboard text size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = "Dashboard", tooltip = "Size of ALL dashboard text. Normal by default; bump to Large or Huge for readability, or drop to Small if the table takes too much chart room.", display = display.none)
+
+// --- Inputs: Style / Readability (STANDING RULE) --------------------------------
+signalTextSize = input.string("Normal", "Signal label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = "Style / Readability", tooltip = "Size of ALL on-chart signal text: entry labels, cancel/status markers, line-price tags. Normal by default; adjust from Tiny to Huge.", display = display.none)
+
+// --- Inputs: Style -------------------------------------------------------------
+boxColor  = input.color(color.new(color.yellow, 85), "ORB Box Fill", group = "Style", tooltip = "Fill color of the opening-range box.", display = display.none)
+lineColor = input.color(color.yellow, "ORB High/Low Lines", group = "Style", tooltip = "Color of the box border and the frozen range high/low lines that extend right after the range completes.", display = display.none)
+
+// Map the readability settings to Pine constants (single line per repo rule).
+f_sigSize() => signalTextSize == "Tiny" ? size.tiny : signalTextSize == "Small" ? size.small : signalTextSize == "Normal" ? size.normal : signalTextSize == "Huge" ? size.huge : size.large
+f_dashSize() => dashTextSize == "Tiny" ? size.tiny : dashTextSize == "Small" ? size.small : dashTextSize == "Normal" ? size.normal : dashTextSize == "Huge" ? size.huge : size.large
+f_dashPos() => dashPos == "Top left" ? position.top_left : dashPos == "Top center" ? position.top_center : dashPos == "Top right" ? position.top_right : dashPos == "Bottom left" ? position.bottom_left : dashPos == "Bottom center" ? position.bottom_center : position.bottom_right
+
+// --- Trade display mode (Stage 9a): registry of per-trade drawings ----------------
+// One TradeVis per setup/trade instance; status: 0 pending (armed, live) ·
+// 1 fired · 2 dead (cancelled/blocked/day-end pending) · 3 hidden (transient
+// sweep marker). Hiding = transparent colors, never deletion (extension loops
+// keep working on invisible objects; a settings change recalcs everything).
+type TradeVis
+    int status
+    array<line> lns
+    array<label> lbls
+
+f_hideUnit(TradeVis u) =>
+    if array.size(u.lns) > 0
+        for i = 0 to array.size(u.lns) - 1
+            line.set_color(array.get(u.lns, i), color.new(color.black, 100))
+    if array.size(u.lbls) > 0
+        for i = 0 to array.size(u.lbls) - 1
+            label hl = array.get(u.lbls, i)
+            label.set_color(hl, color.new(color.black, 100))
+            label.set_textcolor(hl, color.new(color.black, 100))
+
+// VWAP: computed EVERY bar regardless of the display toggle (the filter and
+// the Data Window read this series; the toggle only gates plot color).
+vwapVal = ta.vwap(hlc3)
+
+// --- Session-string assembly (Stage 1fix): zero-pad the spinners into the SAME
+// "HHMM-HHMM" string the engine has consumed since Stage 1. minval/maxval makes
+// malformed times impossible; the one degenerate case is start == end (zero-
+// width window) → detection disabled + loud ⚠ label, never a silent guess.
+f_hhmm(int h, int m) => (h < 10 ? "0" + str.tostring(h) : str.tostring(h)) + (m < 10 ? "0" + str.tostring(m) : str.tostring(m))
+// 9b v3: sub-tick price equality (for ORB-tag suppression on SL/TP coincidence).
+f_nearEq(float a, float b) => not na(a) and not na(b) and math.abs(a - b) < syminfo.mintick / 2
+
+// Single-box HHMM revision: minval/maxval (0-2359) still caps the HOUR at 23,
+// but a single box CAN encode an invalid MINUTE (e.g. 975) — validated here.
+// Degenerate cases → detection disabled + loud ⚠ label, never a silent guess.
+minutesOk     = rangeStartM <= 59 and rangeEndM <= 59
+rangeOk       = minutesOk and not (rangeStartH == rangeEndH and rangeStartM == rangeEndM)
+orbSessionStr = rangeOk ? f_hhmm(rangeStartH, rangeStartM) + "-" + f_hhmm(rangeEndH, rangeEndM) : "0930-1000"
+exitTime      = useTimeExit ? f_hhmm(exitH, exitM) : "1500"   // string only consumed when useTimeExit
+
+// --- Range-window detection (spec §1.2) — engine line unchanged since Stage 1;
+// only the string's source changed (assembled from spinners, gated by rangeOk) ----
+inSession    = rangeOk and not na(time(timeframe.period, orbSessionStr, sessionTz))
+sessionStart = inSession and not inSession[1]
+sessionEnd   = not inSession and inSession[1]
+
+// --- Time-exit window (spec §4.3): same time() family, exitTime → midnight ------
+inExitWin  = useTimeExit and not na(time(timeframe.period, exitTime + "-2400", sessionTz))
+exitBarNow = inExitWin and not inExitWin[1]
+var bool exitedToday = false
+if sessionStart
+    exitedToday := false
+if exitBarNow
+    exitedToday := true
+
+// --- Range capture + freeze (spec §1.3) ------------------------------------------
+var float orbHigh  = na
+var float orbLow   = na
+var int   orbLeft  = na
+var bool  orbReady = false
+
+if sessionStart
+    orbHigh  := high
+    orbLow   := low
+    orbLeft  := time
+    orbReady := false
+else if inSession
+    orbHigh := math.max(orbHigh, high)
+    orbLow  := math.min(orbLow, low)
+
+if sessionEnd
+    orbReady := true
+
+// --- Box + frozen high/low lines (spec §1.4) --------------------------------------
+// Stage 9b: per-day PRICE TAGS on the frozen lines (order-placement readout);
+// follow the range lines, NOT the per-trade declutter.
+var box   orbBox  = na
+var line  hiLine  = na
+var line  loLine  = na
+var label hiPxLbl = na
+var label loPxLbl = na
+
+if sessionStart
+    orbBox := box.new(time, high, time, low, xloc = xloc.bar_time, bgcolor = boxColor, border_color = lineColor)
+else if inSession and not na(orbBox)
+    box.set_top(orbBox, orbHigh)
+    box.set_bottom(orbBox, orbLow)
+    box.set_right(orbBox, time)
+
+if sessionEnd
+    hiLine := line.new(orbLeft, orbHigh, time, orbHigh, xloc = xloc.bar_time, color = lineColor, style = line.style_dashed)
+    loLine := line.new(orbLeft, orbLow, time, orbLow, xloc = xloc.bar_time, color = lineColor, style = line.style_dashed)
+    if showLinePrices
+        hiPxLbl := label.new(bar_index + 22, orbHigh, str.tostring(orbHigh, format.mintick), style = label.style_label_left, color = lineColor, textcolor = color.black, size = f_sigSize())
+        loPxLbl := label.new(bar_index + 22, orbLow, str.tostring(orbLow, format.mintick), style = label.style_label_left, color = lineColor, textcolor = color.black, size = f_sigSize())
+else if orbReady and not na(hiLine)
+    line.set_x2(hiLine, time)
+    line.set_x2(loLine, time)
+    if not na(hiPxLbl)
+        label.set_x(hiPxLbl, bar_index + 22)
+        label.set_x(loPxLbl, bar_index + 22)
+
+// --- Break detection: Dial 1 + buffer + min-bars-outside (spec §2.2–2.5) ---------
+bufferAmt    = (bufferPct / 100) * (orbHigh - orbLow)
+longTrigger  = orbHigh + bufferAmt
+shortTrigger = orbLow  - bufferAmt
+
+// Strict inequalities: a print exactly AT the trigger is a touch, not a break.
+// `not inExitWin` = the time-exit engine gate (§4.3 effect 3): at/after the
+// exit time no new breaks are detected → nothing counts, arms, or fires.
+// 9b v4: allowLong/allowShort = the Trade-direction MASTER GATE at the root —
+// a suppressed side never detects a break, so nothing downstream ever runs.
+allowLong  = tradeDir != "Short only"
+allowShort = tradeDir != "Long only"
+longBeyond   = allowLong and orbReady and not inExitWin and (breakType == "Trade through" ? high > longTrigger  : close > longTrigger)
+shortBeyond  = allowShort and orbReady and not inExitWin and (breakType == "Trade through" ? low  < shortTrigger : close < shortTrigger)
+
+// --- Volume confirmation (spec §6.2–6.3): gates the RUN START, not the fire ------
+// Benchmark = PRIOR-bar SMA of volume (break bar excluded from its own average).
+// Only the run-INITIATING bar needs the surge; continuation bars (min-bars) don't.
+// Late-volume recognition falls out naturally: a weak poke leaves the run at 0,
+// and the next still-beyond bar WITH volume starts the run there instead.
+volAvgPrev = ta.sma(volume, volLen)[1]
+volOK      = volume > volAvgPrev * volMult
+runStartOk = not useVolFilter or volOK
+
+var int longRun  = 0
+var int shortRun = 0
+longRun  := longBeyond  ? (longRun  > 0 ? longRun  + 1 : runStartOk ? 1 : 0) : 0
+shortRun := shortBeyond ? (shortRun > 0 ? shortRun + 1 : runStartOk ? 1 : 0) : 0
+
+// A bar that is beyond the level but whose run stayed at 0 = a volume-blocked start.
+longVolBlock  = useVolFilter and longBeyond  and longRun  == 0
+shortVolBlock = useVolFilter and shortBeyond and shortRun == 0
+if showVolBlocks and longVolBlock
+    label.new(bar_index, longTrigger, "", style = label.style_circle, color = color.new(color.gray, 50), size = size.tiny)
+if showVolBlocks and shortVolBlock
+    label.new(bar_index, shortTrigger, "", style = label.style_circle, color = color.new(color.gray, 50), size = size.tiny)
+
+needed     = math.max(minBarsOutside, 1)
+longBreak  = longRun  == needed
+shortBreak = shortRun == needed
+
+// --- Dial 2: occurrence counting + the actionable break (spec §2.10) -------------
+needed2 = whichBreak == "First" ? 1 : 2
+
+var int  longCount  = 0
+var int  shortCount = 0
+var bool longDone   = false
+var bool shortDone  = false
+
+if sessionStart
+    longCount  := 0
+    shortCount := 0
+    longDone   := false
+    shortDone  := false
+
+if longBreak
+    longCount := longCount + 1
+if shortBreak
+    shortCount := shortCount + 1
+
+actionableLong  = longBreak  and not longDone and longCount  == needed2
+actionableShort = shortBreak and not shortDone and shortCount == needed2
+
+if actionableLong
+    longDone := true
+if actionableShort
+    shortDone := true
+
+// Trade-display registry (Stage 9a): a unit is born on the actionable break
+// (arrow bar); every drawing that setup produces is pushed into it. A unit
+// still pending at day end goes dead (its visuals stay only in "All").
+var array<TradeVis> tradeUnits = array.new<TradeVis>()
+var TradeVis longU  = na
+var TradeVis shortU = na
+if sessionStart
+    if not na(longU) and longU.status == 0
+        longU.status := 2
+    if not na(shortU) and shortU.status == 0
+        shortU.status := 2
+    longU  := na
+    shortU := na
+if actionableLong
+    longU := TradeVis.new(0, array.new<line>(), array.new<label>())
+    array.push(tradeUnits, longU)
+if actionableShort
+    shortU := TradeVis.new(0, array.new<line>(), array.new<label>())
+    array.push(tradeUnits, shortU)
+
+// --- Dial 3: entry timing (spec §2.11 as amended) ---------------------------------
+// Shared entry contract for Stage 4: per side {fired, entryPrice, entryBar}.
+var float longEntryPx   = na
+var int   longEntryBar  = na
+var float shortEntryPx  = na
+var int   shortEntryBar = na
+
+// Retest state, per side: 0 idle · 1 armed · 2 touched · 3 fired · 4 cancelled.
+var int  longRtState   = 0
+var int  longRtArmBar  = na
+var int  longRtTouchBar = na
+var int  longRtCancel  = 0
+var line longRtLine    = na
+var int  shortRtState   = 0
+var int  shortRtArmBar  = na
+var int  shortRtTouchBar = na
+var int  shortRtCancel  = 0
+var line shortRtLine    = na
+
+// Retrace state, per side: 0 idle · 1 armed · 2 touched (Confirmed mode only —
+// Touch mode fires directly on reach) · 3 fired · 4 cancelled.
+// Cancel (retest + retrace): 0 none · 1 opposite edge · 2 timeout ·
+// 3 time exit · 4 VWAP filter block.
+var int   longRcState    = 0
+var int   longRcArmBar   = na
+var int   longRcTouchBar = na
+var float longRcLevel    = na
+var int   longRcCancel   = 0
+var line  longRcLine     = na
+var int   shortRcState    = 0
+var int   shortRcArmBar   = na
+var int   shortRcTouchBar = na
+var float shortRcLevel    = na
+var int   shortRcCancel   = 0
+var line  shortRcLine     = na
+// Stage 9b: retrace-level price tags (per-trade — pushed into TradeVis units).
+var label longRcPxLbl  = na
+var label shortRcPxLbl = na
+
+if sessionStart
+    longEntryPx    := na
+    longEntryBar   := na
+    shortEntryPx   := na
+    shortEntryBar  := na
+    longRtState    := 0
+    longRtArmBar   := na
+    longRtTouchBar := na
+    longRtCancel   := 0
+    shortRtState    := 0
+    shortRtArmBar   := na
+    shortRtTouchBar := na
+    shortRtCancel   := 0
+    longRcState    := 0
+    longRcArmBar   := na
+    longRcTouchBar := na
+    longRcLevel    := na
+    longRcCancel   := 0
+    shortRcState    := 0
+    shortRcArmBar   := na
+    shortRcTouchBar := na
+    shortRcLevel    := na
+    shortRcCancel   := 0
+
+// IMMEDIATE (S3b-i, unchanged): fire on the actionable bar at the TRIGGER
+// LEVEL; gap-through fills at the real open + flag.
+longFireImm  = entryTiming == "Immediate" and actionableLong
+shortFireImm = entryTiming == "Immediate" and actionableShort
+longGapFill  = longFireImm  and open > longTrigger
+shortGapFill = shortFireImm and open < shortTrigger
+
+// Dial-3 fire/cancel event booleans for this bar (all modes).
+longFireRt     = false
+longCancelNow  = false
+shortFireRt    = false
+shortCancelNow = false
+longFireRc      = false
+longRcCancelNow = false
+shortFireRc      = false
+shortRcCancelNow = false
+
+// RETEST — ARM (S3b-ii, unchanged; Option-B same-bar rule).
+if entryTiming == "Retest" and actionableLong and longRtState == 0
+    longRtState  := 1
+    longRtArmBar := bar_index
+    longRtLine   := line.new(bar_index, orbHigh, bar_index, orbHigh, color = color.orange, width = 2)
+    array.push(longU.lns, longRtLine)
+    if open > orbHigh and low <= orbHigh
+        longRtState    := 2
+        longRtTouchBar := bar_index
+        if breakType == "Trade through" ? high > orbHigh : close > orbHigh
+            longRtState  := 3
+            longFireRt   := true
+            longEntryPx  := orbHigh
+            longEntryBar := bar_index
+if entryTiming == "Retest" and actionableShort and shortRtState == 0
+    shortRtState  := 1
+    shortRtArmBar := bar_index
+    shortRtLine   := line.new(bar_index, orbLow, bar_index, orbLow, color = color.orange, width = 2)
+    array.push(shortU.lns, shortRtLine)
+    if open < orbLow and high >= orbLow
+        shortRtState    := 2
+        shortRtTouchBar := bar_index
+        if breakType == "Trade through" ? low < orbLow : close < orbLow
+            shortRtState  := 3
+            shortFireRt   := true
+            shortEntryPx  := orbLow
+            shortEntryBar := bar_index
+
+// TIME EXIT — cancel-first at the exit bar (spec §4.3 effect 2): armed setups
+// die AT the flatten time; the exit bar itself cannot fill them (you are flat
+// at the time — this deliberately precedes the fill evaluations below).
+// Cancel reason 3 = time exit. Marker eligibility captured pre-cancel.
+// STRATEGY: this is also where the REAL flatten happens — cancel all resting
+// stop/target orders and close any open position at market (fills at this
+// bar's close via process_orders_on_close).
+timeExitMarkerNow = false
+if exitBarNow
+    timeExitMarkerNow := longRtState == 1 or longRtState == 2 or shortRtState == 1 or shortRtState == 2 or longRcState == 1 or longRcState == 2 or shortRcState == 1 or shortRcState == 2 or not na(longEntryPx) or not na(shortEntryPx)
+    strategy.cancel_all()
+    strategy.close_all(comment = "Time exit " + exitTime)
+    if longRtState == 1 or longRtState == 2
+        longRtState   := 4
+        longRtCancel  := 3
+        longCancelNow := true
+    if shortRtState == 1 or shortRtState == 2
+        shortRtState   := 4
+        shortRtCancel  := 3
+        shortCancelNow := true
+    if longRcState == 1 or longRcState == 2
+        longRcState     := 4
+        longRcCancel    := 3
+        longRcCancelNow := true
+    if shortRcState == 1 or shortRcState == 2
+        shortRcState     := 4
+        shortRcCancel    := 3
+        shortRcCancelNow := true
+
+// RETEST — evaluate from the bar AFTER the arm bar (S3b-ii, unchanged; gated
+// by the time-exit window — states are terminal after the exit bar anyway).
+if (longRtState == 1 or longRtState == 2) and bar_index > longRtArmBar and not inExitWin
+    if longRtState == 1 and low <= orbHigh
+        longRtState    := 2
+        longRtTouchBar := bar_index
+    if longRtState == 2 and (breakType == "Trade through" ? high > orbHigh : close > orbHigh)
+        longRtState  := 3
+        longFireRt   := true
+        longEntryPx  := bar_index == longRtTouchBar ? orbHigh : math.max(open, orbHigh)
+        longEntryBar := bar_index
+    else if close < orbLow
+        longRtState   := 4
+        longRtCancel  := 1
+        longCancelNow := true
+    else if useArmTimeout and bar_index - longRtArmBar >= armTimeoutBars
+        longRtState   := 4
+        longRtCancel  := 2
+        longCancelNow := true
+
+if (shortRtState == 1 or shortRtState == 2) and bar_index > shortRtArmBar and not inExitWin
+    if shortRtState == 1 and high >= orbLow
+        shortRtState    := 2
+        shortRtTouchBar := bar_index
+    if shortRtState == 2 and (breakType == "Trade through" ? low < orbLow : close < orbLow)
+        shortRtState  := 3
+        shortFireRt   := true
+        shortEntryPx  := bar_index == shortRtTouchBar ? orbLow : math.min(open, orbLow)
+        shortEntryBar := bar_index
+    else if close > orbHigh
+        shortRtState   := 4
+        shortRtCancel  := 1
+        shortCancelNow := true
+    else if useArmTimeout and bar_index - shortRtArmBar >= armTimeoutBars
+        shortRtState   := 4
+        shortRtCancel  := 2
+        shortCancelNow := true
+
+// RETRACE — ARM on the actionable break: resting limit at edge ∓ pct×range
+// INTO the box; dotted orange line. Option-B same-bar arm+fill: only when the
+// arm bar OPENED beyond the RAW edge (provable post-open pullback through the
+// edge down/up to the level); fill = the level (open beyond edge ⇒ min/max
+// formula returns the level).
+if entryTiming == "Retrace" and actionableLong and longRcState == 0
+    longRcState  := 1
+    longRcArmBar := bar_index
+    longRcLevel  := orbHigh - (retracePct / 100) * (orbHigh - orbLow)
+    longRcLine   := line.new(bar_index, longRcLevel, bar_index, longRcLevel, color = color.orange, style = line.style_dotted, width = 1)
+    array.push(longU.lns, longRcLine)
+    if showLinePrices
+        longRcPxLbl := label.new(bar_index + 26, longRcLevel, str.tostring(longRcLevel, format.mintick), style = label.style_label_left, color = color.orange, textcolor = color.black, size = f_sigSize())
+        array.push(longU.lbls, longRcPxLbl)
+    if open > orbHigh and low <= longRcLevel
+        if retraceFill == "Touch"
+            longRcState  := 3
+            longFireRc   := true
+            longEntryPx  := math.min(open, longRcLevel)
+            longEntryBar := bar_index
+        else
+            longRcState    := 2
+            longRcTouchBar := bar_index
+            if breakType == "Trade through" ? high > longRcLevel : close > longRcLevel
+                longRcState  := 3
+                longFireRc   := true
+                longEntryPx  := longRcLevel
+                longEntryBar := bar_index
+if entryTiming == "Retrace" and actionableShort and shortRcState == 0
+    shortRcState  := 1
+    shortRcArmBar := bar_index
+    shortRcLevel  := orbLow + (retracePct / 100) * (orbHigh - orbLow)
+    shortRcLine   := line.new(bar_index, shortRcLevel, bar_index, shortRcLevel, color = color.orange, style = line.style_dotted, width = 1)
+    array.push(shortU.lns, shortRcLine)
+    if showLinePrices
+        shortRcPxLbl := label.new(bar_index + 26, shortRcLevel, str.tostring(shortRcLevel, format.mintick), style = label.style_label_left, color = color.orange, textcolor = color.black, size = f_sigSize())
+        array.push(shortU.lbls, shortRcPxLbl)
+    if open < orbLow and high >= shortRcLevel
+        if retraceFill == "Touch"
+            shortRcState  := 3
+            shortFireRc   := true
+            shortEntryPx  := math.max(open, shortRcLevel)
+            shortEntryBar := bar_index
+        else
+            shortRcState    := 2
+            shortRcTouchBar := bar_index
+            if breakType == "Trade through" ? low < shortRcLevel : close < shortRcLevel
+                shortRcState  := 3
+                shortFireRc   := true
+                shortEntryPx  := shortRcLevel
+                shortEntryBar := bar_index
+
+// RETRACE — evaluate from the bar AFTER the arm bar. FILL-BEFORE-INVALIDATION:
+// the fill check runs first; a bar that fills AND would invalidate still
+// fills. TOUCH mode: pure resting limit — fires on reach, entry = the level
+// (a bar OPENING through the level fills at the BETTER price + gap flag).
+// CONFIRMED mode: the Retest machinery anchored at the retrace level — touch
+// latch, then a Dial-1-governed re-cross back through the level fires it;
+// entry = the level (same-bar touch+fire → level; a later fire bar opening
+// beyond the level in the breakout direction → real open + gap flag).
+if (longRcState == 1 or longRcState == 2) and bar_index > longRcArmBar and not inExitWin
+    if retraceFill == "Confirmed" and longRcState == 1 and low <= longRcLevel
+        longRcState    := 2
+        longRcTouchBar := bar_index
+    longRcFillNow = retraceFill == "Touch" ? longRcState == 1 and low <= longRcLevel : longRcState == 2 and (breakType == "Trade through" ? high > longRcLevel : close > longRcLevel)
+    if longRcFillNow
+        longRcState  := 3
+        longFireRc   := true
+        longEntryPx  := retraceFill == "Touch" ? math.min(open, longRcLevel) : bar_index == longRcTouchBar ? longRcLevel : math.max(open, longRcLevel)
+        longEntryBar := bar_index
+    else if close < orbLow
+        longRcState     := 4
+        longRcCancel    := 1
+        longRcCancelNow := true
+    else if useArmTimeout and bar_index - longRcArmBar >= armTimeoutBars
+        longRcState     := 4
+        longRcCancel    := 2
+        longRcCancelNow := true
+
+if (shortRcState == 1 or shortRcState == 2) and bar_index > shortRcArmBar and not inExitWin
+    if retraceFill == "Confirmed" and shortRcState == 1 and high >= shortRcLevel
+        shortRcState    := 2
+        shortRcTouchBar := bar_index
+    shortRcFillNow = retraceFill == "Touch" ? shortRcState == 1 and high >= shortRcLevel : shortRcState == 2 and (breakType == "Trade through" ? low < shortRcLevel : close < shortRcLevel)
+    if shortRcFillNow
+        shortRcState  := 3
+        shortFireRc   := true
+        shortEntryPx  := retraceFill == "Touch" ? math.max(open, shortRcLevel) : bar_index == shortRcTouchBar ? shortRcLevel : math.min(open, shortRcLevel)
+        shortEntryBar := bar_index
+    else if close > orbHigh
+        shortRcState     := 4
+        shortRcCancel    := 1
+        shortRcCancelNow := true
+    else if useArmTimeout and bar_index - shortRcArmBar >= armTimeoutBars
+        shortRcState     := 4
+        shortRcCancel    := 2
+        shortRcCancelNow := true
+
+// Armed-line extension (retest solid / retrace dotted) while armed.
+if (longRtState == 1 or longRtState == 2) and not na(longRtLine)
+    line.set_x2(longRtLine, bar_index)
+if (shortRtState == 1 or shortRtState == 2) and not na(shortRtLine)
+    line.set_x2(shortRtLine, bar_index)
+if longRcState == 1 and not na(longRcLine)
+    line.set_x2(longRcLine, bar_index)
+    if not na(longRcPxLbl)
+        label.set_x(longRcPxLbl, bar_index + 26)
+if shortRcState == 1 and not na(shortRcLine)
+    line.set_x2(shortRcLine, bar_index)
+    if not na(shortRcPxLbl)
+        label.set_x(shortRcPxLbl, bar_index + 26)
+
+// --- VWAP trend filter (spec §5.2): the FINAL GATE at the fire moment ------------
+// Pipeline within the bar: fill condition → VWAP gate → fire or cancel. A
+// blocked fire is a TERMINAL CANCEL: the armed state (if any) flips to 4 with
+// cancel reason 4 (VWAP), the entry contract is cleared, and — because the
+// Dial-2 dedupe already consumed the actionable break — that side is done for
+// the day. Strict inequalities: a close exactly ON VWAP is blocked.
+longFireAny  = longFireImm or longFireRt or longFireRc
+shortFireAny = shortFireImm or shortFireRt or shortFireRc
+
+vwapBlockLong  = useVwapFilter and longFireAny and not (close > vwapVal)
+vwapBlockShort = useVwapFilter and shortFireAny and not (close < vwapVal)
+
+if vwapBlockLong
+    longEntryPx  := na
+    longEntryBar := na
+    if longFireRt
+        longRtState  := 4
+        longRtCancel := 4
+    if longFireRc
+        longRcState  := 4
+        longRcCancel := 4
+if vwapBlockShort
+    shortEntryPx  := na
+    shortEntryBar := na
+    if shortFireRt
+        shortRtState  := 4
+        shortRtCancel := 4
+    if shortFireRc
+        shortRcState  := 4
+        shortRcCancel := 4
+
+// --- POSITION-OPEN GATE (revised): a same-direction fire while a position is
+// still open is now a PAPER FIRE — the chart draws everything exactly as the
+// indicator did (entry marker, stop line, all four TP levels, dashboard,
+// TP-hit tracking), but the ORDER LAYER is suppressed: no strategy.entry (it
+// would be dropped by pyramiding = 0 anyway) and critically NO strategy.exit
+// re-issue, so the live position's stop/target orders are never touched
+// (the original wrong-stop bug). No ⊘ label, per Rick — the suppression is
+// silent on the chart; the open position's own exits remain the only orders.
+posBlockLong  = strategy.position_size > 0
+posBlockShort = strategy.position_size < 0
+
+// Entry fills → the shared contract (post-gate; Immediate set here,
+// Retest/Retrace set inside their fire branches above).
+longEntryFire  = longFireAny and not vwapBlockLong
+shortEntryFire = shortFireAny and not vwapBlockShort
+
+if longFireImm and not vwapBlockLong
+    longEntryPx  := math.max(open, longTrigger)
+    longEntryBar := bar_index
+if shortFireImm and not vwapBlockShort
+    shortEntryPx  := math.min(open, shortTrigger)
+    shortEntryBar := bar_index
+
+// Trade-display registry: resolve unit status once all fire/cancel/block
+// flags for this bar are final (0 pending → 1 fired / 2 dead).
+if not na(longU)
+    if longEntryFire
+        longU.status := 1
+    else if vwapBlockLong or longCancelNow or longRcCancelNow
+        longU.status := 2
+if not na(shortU)
+    if shortEntryFire
+        shortU.status := 1
+    else if vwapBlockShort or shortCancelNow or shortRcCancelNow
+        shortU.status := 2
+
+// Unified gap flags (Immediate: open beyond trigger; Retest: later-bar fire
+// opening beyond the edge post-touch; Retrace-Touch: fill bar opened through
+// the level in the fill direction — a BETTER-price fill, still flagged;
+// Retrace-Confirmed: later fire bar opened beyond the level post-touch).
+longGapAll  = longGapFill  or (longFireRt  and bar_index > longRtTouchBar  and open > orbHigh) or (longFireRc and (retraceFill == "Touch" ? open < longRcLevel : bar_index > longRcTouchBar and open > longRcLevel))
+shortGapAll = shortGapFill or (shortFireRt and bar_index > shortRtTouchBar and open < orbLow) or (shortFireRc and (retraceFill == "Touch" ? open > shortRcLevel : bar_index > shortRcTouchBar and open < shortRcLevel))
+
+// --- Stop engine (spec §3.2–3.5): computed ONCE on the fire bar, then static -----
+// ta.atr called unconditionally every bar (Pine series consistency); the value
+// READ on the fire bar is the frozen ATR the stop uses.
+atrVal = ta.atr(atrLen)
+
+var float longStopPx  = na
+var float longRVal    = na
+var float longStopOk  = na   // 1 = valid, 0 = rejected by the guard, na = no trade
+var line  longStopLine = na
+var label longStopLbl  = na
+var float shortStopPx  = na
+var float shortRVal    = na
+var float shortStopOk  = na
+var line  shortStopLine = na
+var label shortStopLbl  = na
+
+// Targets (spec §4.2): TPn = entry ± rrN × R, computed with the stop on the
+// fire bar, frozen. Line/label handles kept in arrays for extension; label
+// stagger = FIXED SLOTS right of the price edge (SL +0, TP1 +2, TP2 +4,
+// TP3 +6, TP4 +8 bars) so text can never stack.
+var float longTP1 = na
+var float longTP2 = na
+var float longTP3 = na
+var float longTP4 = na
+var float shortTP1 = na
+var float shortTP2 = na
+var float shortTP3 = na
+var float shortTP4 = na
+var array<line>  longTPLines  = array.new<line>()
+var array<label> longTPLbls   = array.new<label>()
+var array<line>  shortTPLines = array.new<line>()
+var array<label> shortTPLbls  = array.new<label>()
+
+if sessionStart
+    longStopPx  := na
+    longRVal    := na
+    longStopOk  := na
+    longStopLine := na
+    longStopLbl  := na
+    shortStopPx  := na
+    shortRVal    := na
+    shortStopOk  := na
+    shortStopLine := na
+    shortStopLbl  := na
+    longTP1 := na
+    longTP2 := na
+    longTP3 := na
+    longTP4 := na
+    shortTP1 := na
+    shortTP2 := na
+    shortTP3 := na
+    shortTP4 := na
+    array.clear(longTPLines)
+    array.clear(longTPLbls)
+    array.clear(shortTPLines)
+    array.clear(shortTPLbls)
+
+if longEntryFire
+    float sLong = stopType == "Full range" ? orbLow : stopType == "% of range" ? orbHigh - (stopRangePct / 100) * (orbHigh - orbLow) : stopType == "% ATR" ? longEntryPx - atrMult * atrVal : stopType == "Ticks" ? longEntryPx - stopTicks * syminfo.mintick : longEntryPx - riskDollars / syminfo.pointvalue
+    float rLong = longEntryPx - sLong
+    if sLong < longEntryPx and rLong >= syminfo.mintick
+        longStopPx   := sLong
+        longRVal     := rLong
+        longStopOk   := 1
+        longTP1      := longEntryPx + rr1 * rLong
+        longTP2      := longEntryPx + rr2 * rLong
+        longTP3      := longEntryPx + rr3 * rLong
+        longTP4      := longEntryPx + rr4 * rLong
+        // STRATEGY ORDERS: market entry (fills at this bar's close) + resting
+        // stop/limit exits at the Stage-4/5 levels. Orders only exist when the
+        // guard accepted the stop — the strategy never holds an unprotected
+        // position. POSITION-OPEN GATE: skipped entirely when already long —
+        // no entry (pyramiding = 0 would drop it) and no exit re-issue (a
+        // same-ID strategy.exit would silently MOVE the live position's stop
+        // to this new level — the original wrong-stop bug). The levels below
+        // still draw regardless. Short while long → reversal path, allowed.
+        if not posBlockLong
+            strategy.entry("Long", strategy.long, qty = tradeQty)
+            if exitMode == "Single target"
+                float longTgt = exitTarget == "TP1" ? longTP1 : exitTarget == "TP2" ? longTP2 : exitTarget == "TP3" ? longTP3 : longTP4
+                strategy.exit("L Exit", from_entry = "Long", stop = sLong, limit = longTgt)
+            else
+                strategy.exit("L TP1", from_entry = "Long", stop = sLong, limit = longTP1, qty_percent = 25)
+                strategy.exit("L TP2", from_entry = "Long", stop = sLong, limit = longTP2, qty_percent = 25)
+                strategy.exit("L TP3", from_entry = "Long", stop = sLong, limit = longTP3, qty_percent = 25)
+                strategy.exit("L TP4", from_entry = "Long", stop = sLong, limit = longTP4, qty_percent = 25)
+        if showLevels
+            longStopLine := line.new(bar_index, sLong, bar_index + 1, sLong, color = color.red, width = 1)
+            if showStopLbl
+                longStopLbl := label.new(bar_index, sLong, "SL " + str.tostring(sLong, format.mintick), style = label.style_label_left, color = color.red, textcolor = color.white, size = f_sigSize())
+            array.push(longTPLines, line.new(bar_index, longTP1, bar_index + 1, longTP1, color = color.green, style = line.style_dotted, width = 1))
+            array.push(longTPLines, line.new(bar_index, longTP2, bar_index + 1, longTP2, color = color.green, style = line.style_dotted, width = 1))
+            array.push(longTPLines, line.new(bar_index, longTP3, bar_index + 1, longTP3, color = color.green, style = line.style_dotted, width = 1))
+            array.push(longTPLines, line.new(bar_index, longTP4, bar_index + 1, longTP4, color = color.green, style = line.style_dotted, width = 1))
+            if showTpLbls
+                array.push(longTPLbls, label.new(bar_index, longTP1, "TP1 @ " + str.tostring(longTP1, format.mintick), style = label.style_label_left, color = color.green, textcolor = color.white, size = f_sigSize()))
+                array.push(longTPLbls, label.new(bar_index, longTP2, "TP2 @ " + str.tostring(longTP2, format.mintick), style = label.style_label_left, color = color.green, textcolor = color.white, size = f_sigSize()))
+                array.push(longTPLbls, label.new(bar_index, longTP3, "TP3 @ " + str.tostring(longTP3, format.mintick), style = label.style_label_left, color = color.green, textcolor = color.white, size = f_sigSize()))
+                array.push(longTPLbls, label.new(bar_index, longTP4, "TP4 @ " + str.tostring(longTP4, format.mintick), style = label.style_label_left, color = color.green, textcolor = color.white, size = f_sigSize()))
+            if not na(longU)
+                array.push(longU.lns, longStopLine)
+                if not na(longStopLbl)
+                    array.push(longU.lbls, longStopLbl)
+                for i = 0 to 3
+                    array.push(longU.lns, array.get(longTPLines, array.size(longTPLines) - 4 + i))
+                if showTpLbls
+                    for i = 0 to 3
+                        array.push(longU.lbls, array.get(longTPLbls, array.size(longTPLbls) - 4 + i))
+    else
+        longStopOk := 0
+        // Collision-specific rejection text (locked): name the exact clash +
+        // its live values. Never clamp, never auto-fix. STRATEGY: no orders.
+        string longWhy = stopType == "% of range" and entryTiming == "Retrace" ? "Stop % (" + str.tostring(stopRangePct, "#.##") + ") tighter than Retrace % (" + str.tostring(retracePct, "#.##") + ") — stop lands past entry; widen the stop or reduce the retrace." : rLong < syminfo.mintick and sLong < longEntryPx ? "risk below 1 tick — entry sits at the stop level; widen the stop." : "stop (" + str.tostring(sLong, format.mintick) + ") is not on the risk side of entry (" + str.tostring(longEntryPx, format.mintick) + ") — review Stop settings."
+        label wLbl = label.new(bar_index, high, "⚠ Long stop invalid — trade skipped — " + longWhy, style = label.style_label_down, color = color.new(color.orange, 0), textcolor = color.black, size = f_sigSize())
+        if not na(longU)
+            array.push(longU.lbls, wLbl)
+
+if shortEntryFire
+    float sShort = stopType == "Full range" ? orbHigh : stopType == "% of range" ? orbLow + (stopRangePct / 100) * (orbHigh - orbLow) : stopType == "% ATR" ? shortEntryPx + atrMult * atrVal : stopType == "Ticks" ? shortEntryPx + stopTicks * syminfo.mintick : shortEntryPx + riskDollars / syminfo.pointvalue
+    float rShort = sShort - shortEntryPx
+    if sShort > shortEntryPx and rShort >= syminfo.mintick
+        shortStopPx   := sShort
+        shortRVal     := rShort
+        shortStopOk   := 1
+        shortTP1      := shortEntryPx - rr1 * rShort
+        shortTP2      := shortEntryPx - rr2 * rShort
+        shortTP3      := shortEntryPx - rr3 * rShort
+        shortTP4      := shortEntryPx - rr4 * rShort
+        // Position-open gate mirror (see long side).
+        if not posBlockShort
+            strategy.entry("Short", strategy.short, qty = tradeQty)
+            if exitMode == "Single target"
+                float shortTgt = exitTarget == "TP1" ? shortTP1 : exitTarget == "TP2" ? shortTP2 : exitTarget == "TP3" ? shortTP3 : shortTP4
+                strategy.exit("S Exit", from_entry = "Short", stop = sShort, limit = shortTgt)
+            else
+                strategy.exit("S TP1", from_entry = "Short", stop = sShort, limit = shortTP1, qty_percent = 25)
+                strategy.exit("S TP2", from_entry = "Short", stop = sShort, limit = shortTP2, qty_percent = 25)
+                strategy.exit("S TP3", from_entry = "Short", stop = sShort, limit = shortTP3, qty_percent = 25)
+                strategy.exit("S TP4", from_entry = "Short", stop = sShort, limit = shortTP4, qty_percent = 25)
+        if showLevels
+            shortStopLine := line.new(bar_index, sShort, bar_index + 1, sShort, color = color.red, width = 1)
+            if showStopLbl
+                shortStopLbl := label.new(bar_index, sShort, "SL " + str.tostring(sShort, format.mintick), style = label.style_label_left, color = color.red, textcolor = color.white, size = f_sigSize())
+            array.push(shortTPLines, line.new(bar_index, shortTP1, bar_index + 1, shortTP1, color = color.green, style = line.style_dotted, width = 1))
+            array.push(shortTPLines, line.new(bar_index, shortTP2, bar_index + 1, shortTP2, color = color.green, style = line.style_dotted, width = 1))
+            array.push(shortTPLines, line.new(bar_index, shortTP3, bar_index + 1, shortTP3, color = color.green, style = line.style_dotted, width = 1))
+            array.push(shortTPLines, line.new(bar_index, shortTP4, bar_index + 1, shortTP4, color = color.green, style = line.style_dotted, width = 1))
+            if showTpLbls
+                array.push(shortTPLbls, label.new(bar_index, shortTP1, "TP1 @ " + str.tostring(shortTP1, format.mintick), style = label.style_label_left, color = color.green, textcolor = color.white, size = f_sigSize()))
+                array.push(shortTPLbls, label.new(bar_index, shortTP2, "TP2 @ " + str.tostring(shortTP2, format.mintick), style = label.style_label_left, color = color.green, textcolor = color.white, size = f_sigSize()))
+                array.push(shortTPLbls, label.new(bar_index, shortTP3, "TP3 @ " + str.tostring(shortTP3, format.mintick), style = label.style_label_left, color = color.green, textcolor = color.white, size = f_sigSize()))
+                array.push(shortTPLbls, label.new(bar_index, shortTP4, "TP4 @ " + str.tostring(shortTP4, format.mintick), style = label.style_label_left, color = color.green, textcolor = color.white, size = f_sigSize()))
+            if not na(shortU)
+                array.push(shortU.lns, shortStopLine)
+                if not na(shortStopLbl)
+                    array.push(shortU.lbls, shortStopLbl)
+                for i = 0 to 3
+                    array.push(shortU.lns, array.get(shortTPLines, array.size(shortTPLines) - 4 + i))
+                if showTpLbls
+                    for i = 0 to 3
+                        array.push(shortU.lbls, array.get(shortTPLbls, array.size(shortTPLbls) - 4 + i))
+    else
+        shortStopOk := 0
+        string shortWhy = stopType == "% of range" and entryTiming == "Retrace" ? "Stop % (" + str.tostring(stopRangePct, "#.##") + ") tighter than Retrace % (" + str.tostring(retracePct, "#.##") + ") — stop lands past entry; widen the stop or reduce the retrace." : rShort < syminfo.mintick and sShort > shortEntryPx ? "risk below 1 tick — entry sits at the stop level; widen the stop." : "stop (" + str.tostring(sShort, format.mintick) + ") is not on the risk side of entry (" + str.tostring(shortEntryPx, format.mintick) + ") — review Stop settings."
+        label wLbl2 = label.new(bar_index, low, "⚠ Short stop invalid — trade skipped — " + shortWhy, style = label.style_label_up, color = color.new(color.orange, 0), textcolor = color.black, size = f_sigSize())
+        if not na(shortU)
+            array.push(shortU.lbls, wLbl2)
+
+// 9b v3: ORB-tag suppression — once a SHOWN SL/TP label claims an ORB edge's
+// exact price, that edge's yellow tag is deleted (one label per line, always).
+// If the claiming family's labels are toggled off, the tag stays.
+hiClaimed = showLevels and ((showStopLbl and (f_nearEq(orbHigh, longStopPx) or f_nearEq(orbHigh, shortStopPx))) or (showTpLbls and (f_nearEq(orbHigh, longTP1) or f_nearEq(orbHigh, longTP2) or f_nearEq(orbHigh, longTP3) or f_nearEq(orbHigh, longTP4) or f_nearEq(orbHigh, shortTP1) or f_nearEq(orbHigh, shortTP2) or f_nearEq(orbHigh, shortTP3) or f_nearEq(orbHigh, shortTP4))))
+loClaimed = showLevels and ((showStopLbl and (f_nearEq(orbLow, longStopPx) or f_nearEq(orbLow, shortStopPx))) or (showTpLbls and (f_nearEq(orbLow, longTP1) or f_nearEq(orbLow, longTP2) or f_nearEq(orbLow, longTP3) or f_nearEq(orbLow, longTP4) or f_nearEq(orbLow, shortTP1) or f_nearEq(orbLow, shortTP2) or f_nearEq(orbLow, shortTP3) or f_nearEq(orbLow, shortTP4))))
+if not na(hiPxLbl) and hiClaimed
+    label.delete(hiPxLbl)
+    hiPxLbl := na
+if not na(loPxLbl) and loClaimed
+    label.delete(loPxLbl)
+    loPxLbl := na
+
+// Stop + target lines/labels track the right edge until day end OR the time
+// exit (extension freezes at the exit bar). Label stagger slots: SL +0,
+// TP1 +2, TP2 +4, TP3 +6, TP4 +8 bars right of the edge. Label loops are
+// separate from line loops (9b v3: label families can be toggled off).
+if not na(longStopLine) and (not exitedToday or exitBarNow)
+    line.set_x2(longStopLine, bar_index)
+    if not na(longStopLbl)
+        label.set_x(longStopLbl, bar_index)
+    for i = 0 to array.size(longTPLines) - 1
+        line.set_x2(array.get(longTPLines, i), bar_index)
+    if array.size(longTPLbls) > 0
+        for i = 0 to array.size(longTPLbls) - 1
+            label.set_x(array.get(longTPLbls, i), bar_index + 2 * (i + 1))
+if not na(shortStopLine) and (not exitedToday or exitBarNow)
+    line.set_x2(shortStopLine, bar_index)
+    if not na(shortStopLbl)
+        label.set_x(shortStopLbl, bar_index)
+    for i = 0 to array.size(shortTPLines) - 1
+        line.set_x2(array.get(shortTPLines, i), bar_index)
+    if array.size(shortTPLbls) > 0
+        for i = 0 to array.size(shortTPLbls) - 1
+            label.set_x(array.get(shortTPLbls, i), bar_index + 2 * (i + 1))
+
+// TIME EXIT marker (behind showLevels; only when a trade was armed/fired at
+// the exit moment — quiet days stay quiet).
+if exitBarNow and timeExitMarkerNow and showLevels
+    line.new(bar_index, low, bar_index, high, extend = extend.both, color = color.new(color.gray, 30), style = line.style_dashed, width = 1)
+    label.new(bar_index, high, "TIME EXIT " + exitTime, style = label.style_label_down, color = color.new(color.gray, 30), textcolor = color.white, size = f_sigSize())
+
+// --- Dashboard tracking (spec §7.3): TP-hit + stop-touch flags -------------------
+// Starts the bar AFTER fire (the fire bar itself never counts — which also
+// matches the broker emulator: exits placed on the fire bar activate the next
+// bar); TOUCH semantics; flags LATCH; the time-exit window gates tracking.
+// These grade the LEVELS and keep latching even after the position closes —
+// deliberate: they answer "did price reach TPn today", not "did we fill".
+var bool longStopped = false
+var bool longTp1Hit  = false
+var bool longTp2Hit  = false
+var bool longTp3Hit  = false
+var bool longTp4Hit  = false
+var bool shortStopped = false
+var bool shortTp1Hit  = false
+var bool shortTp2Hit  = false
+var bool shortTp3Hit  = false
+var bool shortTp4Hit  = false
+
+if sessionStart
+    longStopped := false
+    longTp1Hit  := false
+    longTp2Hit  := false
+    longTp3Hit  := false
+    longTp4Hit  := false
+    shortStopped := false
+    shortTp1Hit  := false
+    shortTp2Hit  := false
+    shortTp3Hit  := false
+    shortTp4Hit  := false
+
+if longStopOk == 1 and not na(longEntryBar) and bar_index > longEntryBar and not inExitWin
+    longStopped := longStopped or low <= longStopPx
+    longTp1Hit  := longTp1Hit or high >= longTP1
+    longTp2Hit  := longTp2Hit or high >= longTP2
+    longTp3Hit  := longTp3Hit or high >= longTP3
+    longTp4Hit  := longTp4Hit or high >= longTP4
+if shortStopOk == 1 and not na(shortEntryBar) and bar_index > shortEntryBar and not inExitWin
+    shortStopped := shortStopped or high >= shortStopPx
+    shortTp1Hit  := shortTp1Hit or low <= shortTP1
+    shortTp2Hit  := shortTp2Hit or low <= shortTP2
+    shortTp3Hit  := shortTp3Hit or low <= shortTP3
+    shortTp4Hit  := shortTp4Hit or low <= shortTP4
+
+// --- Chart artifacts -------------------------------------------------------------
+// Break marker style (Stage 9a): Triangle = clean no-text triangle at the
+// BREAK bar; Label = the price callout at the ENTRY bar; Both = both. The
+// strategy tester adds its own fill markers on top — these remain useful
+// because they carry the engine's level price + gap flag.
+markTri = breakMarker == "Triangle" or breakMarker == "Both"
+markLbl = breakMarker == "Label" or breakMarker == "Both"
+if showSignals and markTri and actionableLong
+    label aL = label.new(bar_index, na, "", yloc = yloc.belowbar, style = label.style_triangleup, color = color.new(color.green, 0), size = size.small)
+    if not na(longU)
+        array.push(longU.lbls, aL)
+if showSignals and markTri and actionableShort
+    label aS = label.new(bar_index, na, "", yloc = yloc.abovebar, style = label.style_triangledown, color = color.new(color.red, 0), size = size.small)
+    if not na(shortU)
+        array.push(shortU.lbls, aS)
+
+// Entry + cancel markers — ALL wired to signalTextSize (standing rule).
+if showSignals and markLbl and showEntryLbl and longEntryFire
+    label eL = label.new(bar_index, low, "LONG @ " + str.tostring(longEntryPx, format.mintick) + (longGapAll ? " (gap fill)" : ""), style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = f_sigSize())
+    if not na(longU)
+        array.push(longU.lbls, eL)
+if showSignals and markLbl and showEntryLbl and shortEntryFire
+    label eS = label.new(bar_index, high, "SHORT @ " + str.tostring(shortEntryPx, format.mintick) + (shortGapAll ? " (gap fill)" : ""), style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = f_sigSize())
+    if not na(shortU)
+        array.push(shortU.lbls, eS)
+if showSignals and longCancelNow
+    label cL = label.new(bar_index, high, "✕ long retest cancelled — " + (longRtCancel == 1 ? "opposite edge" : longRtCancel == 2 ? "timeout" : "time exit"), style = label.style_label_down, color = color.new(color.gray, 20), textcolor = color.white, size = f_sigSize())
+    if not na(longU)
+        array.push(longU.lbls, cL)
+if showSignals and shortCancelNow
+    label cS = label.new(bar_index, low, "✕ short retest cancelled — " + (shortRtCancel == 1 ? "opposite edge" : shortRtCancel == 2 ? "timeout" : "time exit"), style = label.style_label_up, color = color.new(color.gray, 20), textcolor = color.white, size = f_sigSize())
+    if not na(shortU)
+        array.push(shortU.lbls, cS)
+if showSignals and longRcCancelNow
+    label cL2 = label.new(bar_index, high, "✕ long retrace cancelled — " + (longRcCancel == 1 ? "opposite edge" : longRcCancel == 2 ? "timeout" : "time exit"), style = label.style_label_down, color = color.new(color.gray, 20), textcolor = color.white, size = f_sigSize())
+    if not na(longU)
+        array.push(longU.lbls, cL2)
+if showSignals and shortRcCancelNow
+    label cS2 = label.new(bar_index, low, "✕ short retrace cancelled — " + (shortRcCancel == 1 ? "opposite edge" : shortRcCancel == 2 ? "timeout" : "time exit"), style = label.style_label_up, color = color.new(color.gray, 20), textcolor = color.white, size = f_sigSize())
+    if not na(shortU)
+        array.push(shortU.lbls, cS2)
+if showSignals and vwapBlockLong
+    label bL = label.new(bar_index, high, "⊘ Blocked: VWAP (long)", style = label.style_label_down, color = color.new(color.gray, 20), textcolor = color.white, size = f_sigSize())
+    if not na(longU)
+        array.push(longU.lbls, bL)
+if showSignals and vwapBlockShort
+    label bS = label.new(bar_index, low, "⊘ Blocked: VWAP (short)", style = label.style_label_up, color = color.new(color.gray, 20), textcolor = color.white, size = f_sigSize())
+    if not na(shortU)
+        array.push(shortU.lbls, bS)
+
+// --- Trade-display sweep (Stage 9a): runs every bar in windowed modes.
+// Dead units (cancelled/blocked/day-end pending) hide immediately; fired units
+// beyond the newest keepN hide oldest-first. Hidden units leave the registry,
+// so it stays small (≤ window + live setups). "All" = sweep never touches
+// anything. Pending (armed) units always stay visible — live information.
+if showTrades != "All"
+    int keepN = showTrades == "Most recent only" ? 1 : recentTrades
+    if array.size(tradeUnits) > 0
+        for i = array.size(tradeUnits) - 1 to 0
+            TradeVis du = array.get(tradeUnits, i)
+            if du.status == 2
+                f_hideUnit(du)
+                array.remove(tradeUnits, i)
+    int firedCount = 0
+    if array.size(tradeUnits) > 0
+        for i = 0 to array.size(tradeUnits) - 1
+            firedCount += array.get(tradeUnits, i).status == 1 ? 1 : 0
+    if firedCount > keepN
+        int toHide = firedCount - keepN
+        for i = 0 to array.size(tradeUnits) - 1
+            TradeVis fu = array.get(tradeUnits, i)
+            if toHide > 0 and fu.status == 1
+                f_hideUnit(fu)
+                fu.status := 3
+                toHide := toHide - 1
+        for i = array.size(tradeUnits) - 1 to 0
+            if array.get(tradeUnits, i).status == 3
+                array.remove(tradeUnits, i)
+
+// --- Input-validation warning (Stage 1fix): the spinners make bad times
+// impossible; the one degenerate case is start == end → persistent ⚠ at the
+// last bar and detection stays off. Rebuilt each last bar.
+var label inputWarn = na
+if barstate.islast
+    if not na(inputWarn)
+        label.delete(inputWarn)
+    if not rangeOk or not exitOk
+        string rangeWhy = not minutesOk ? "invalid minutes in Range start/end (" + str.tostring(rangeStart) + " / " + str.tostring(rangeEnd) + ") — HHMM minutes must be 00-59 (e.g. 930, not 975)." : not rangeOk ? "Range start equals range end (" + f_hhmm(rangeStartH, rangeStartM) + ") — zero-width window; no range forms. Adjust the start or end time." : "invalid minutes in Exit Time (" + str.tostring(exitTimeIn) + ") — HHMM minutes must be 00-59; time exit is OFF until fixed."
+        inputWarn := label.new(bar_index, high, "⚠ " + rangeWhy, style = label.style_label_down, color = color.new(color.orange, 0), textcolor = color.black, size = f_sigSize())
+
+// --- Dashboard (spec §7.2): two-column LONG | SHORT read-out, rebuilt on the
+// last bar only. STRATEGY: the Position row now reads the REAL position
+// (strategy.position_size) — LONG/SHORT while open, "closed" once the strategy
+// has exited, FLAT when that side never fired today. -----------------------------
+f_dashHit(hit, px) => na(px) ? "—" : (hit ? "✓ " : "· ") + str.tostring(px, format.mintick)
+var table dash = na
+if barstate.islast
+    if not na(dash)
+        table.delete(dash)
+    if showDash
+        // 9b v4: dynamic columns — single-direction modes drop the suppressed
+        // side's column entirely (clean 2-column table, no blank column).
+        int nCols = tradeDir == "Both" ? 3 : 2
+        int cL = 1
+        int cS = tradeDir == "Both" ? 2 : 1
+        dash := table.new(f_dashPos(), nCols, 10, bgcolor = color.new(color.black, 15), frame_width = 1, frame_color = color.new(color.gray, 60), border_width = 1, border_color = color.new(color.gray, 75))
+        boxTxt = inSession ? "forming" : orbReady ? "complete" : "none"
+        longFired  = not na(longEntryPx) and not na(longEntryBar)
+        shortFired = not na(shortEntryPx) and not na(shortEntryBar)
+        longArmed  = longRtState == 1 or longRtState == 2 or longRcState == 1 or longRcState == 2
+        shortArmed = shortRtState == 1 or shortRtState == 2 or shortRcState == 1 or shortRcState == 2
+        longStatusTxt  = longFired ? "fired" : longArmed ? "armed" : "none"
+        shortStatusTxt = shortFired ? "fired" : shortArmed ? "armed" : "none"
+        // "· stopped" flag restored from V1 (adoption revision): appended once
+        // price trades through that side's tracked stop level (touch-latched).
+        longPosTxt  = strategy.position_size > 0 ? "LONG" + (longStopped ? " · stopped" : "") : longFired ? "closed" + (longStopped ? " · stopped" : "") : "FLAT"
+        shortPosTxt = strategy.position_size < 0 ? "SHORT" + (shortStopped ? " · stopped" : "") : shortFired ? "closed" + (shortStopped ? " · stopped" : "") : "FLAT"
+        table.cell(dash, 0, 0, "ORB", text_color = color.new(color.gray, 20), text_size = f_dashSize())
+        if allowLong
+            table.cell(dash, cL, 0, "LONG", text_color = color.new(color.green, 0), text_size = f_dashSize())
+        if allowShort
+            table.cell(dash, cS, 0, "SHORT", text_color = color.new(color.red, 0), text_size = f_dashSize())
+        table.cell(dash, 0, 1, "Box", text_color = color.new(color.gray, 20), text_size = f_dashSize())
+        if tradeDir == "Both"
+            table.merge_cells(dash, 1, 1, 2, 1)
+        table.cell(dash, 1, 1, boxTxt, text_color = color.white, text_size = f_dashSize())
+        table.cell(dash, 0, 2, "Status", text_color = color.new(color.gray, 20), text_size = f_dashSize())
+        if allowLong
+            table.cell(dash, cL, 2, longStatusTxt, text_color = color.white, text_size = f_dashSize())
+        if allowShort
+            table.cell(dash, cS, 2, shortStatusTxt, text_color = color.white, text_size = f_dashSize())
+        table.cell(dash, 0, 3, "Position", text_color = color.new(color.gray, 20), text_size = f_dashSize())
+        if allowLong
+            table.cell(dash, cL, 3, longPosTxt, text_color = strategy.position_size > 0 ? color.new(color.green, 0) : color.new(color.gray, 40), text_size = f_dashSize())
+        if allowShort
+            table.cell(dash, cS, 3, shortPosTxt, text_color = strategy.position_size < 0 ? color.new(color.red, 0) : color.new(color.gray, 40), text_size = f_dashSize())
+        table.cell(dash, 0, 4, "Entry", text_color = color.new(color.gray, 20), text_size = f_dashSize())
+        if allowLong
+            table.cell(dash, cL, 4, longFired ? str.tostring(longEntryPx, format.mintick) : "—", text_color = color.white, text_size = f_dashSize())
+        if allowShort
+            table.cell(dash, cS, 4, shortFired ? str.tostring(shortEntryPx, format.mintick) : "—", text_color = color.white, text_size = f_dashSize())
+        table.cell(dash, 0, 5, "Stop", text_color = color.new(color.gray, 20), text_size = f_dashSize())
+        if allowLong
+            table.cell(dash, cL, 5, longStopOk == 1 ? str.tostring(longStopPx, format.mintick) : "—", text_color = color.white, text_size = f_dashSize())
+        if allowShort
+            table.cell(dash, cS, 5, shortStopOk == 1 ? str.tostring(shortStopPx, format.mintick) : "—", text_color = color.white, text_size = f_dashSize())
+        table.cell(dash, 0, 6, "TP1", text_color = color.new(color.gray, 20), text_size = f_dashSize())
+        if allowLong
+            table.cell(dash, cL, 6, f_dashHit(longTp1Hit, longTP1), text_color = longTp1Hit ? color.new(color.green, 0) : color.white, text_size = f_dashSize())
+        if allowShort
+            table.cell(dash, cS, 6, f_dashHit(shortTp1Hit, shortTP1), text_color = shortTp1Hit ? color.new(color.green, 0) : color.white, text_size = f_dashSize())
+        table.cell(dash, 0, 7, "TP2", text_color = color.new(color.gray, 20), text_size = f_dashSize())
+        if allowLong
+            table.cell(dash, cL, 7, f_dashHit(longTp2Hit, longTP2), text_color = longTp2Hit ? color.new(color.green, 0) : color.white, text_size = f_dashSize())
+        if allowShort
+            table.cell(dash, cS, 7, f_dashHit(shortTp2Hit, shortTP2), text_color = shortTp2Hit ? color.new(color.green, 0) : color.white, text_size = f_dashSize())
+        table.cell(dash, 0, 8, "TP3", text_color = color.new(color.gray, 20), text_size = f_dashSize())
+        if allowLong
+            table.cell(dash, cL, 8, f_dashHit(longTp3Hit, longTP3), text_color = longTp3Hit ? color.new(color.green, 0) : color.white, text_size = f_dashSize())
+        if allowShort
+            table.cell(dash, cS, 8, f_dashHit(shortTp3Hit, shortTP3), text_color = shortTp3Hit ? color.new(color.green, 0) : color.white, text_size = f_dashSize())
+        table.cell(dash, 0, 9, "TP4", text_color = color.new(color.gray, 20), text_size = f_dashSize())
+        if allowLong
+            table.cell(dash, cL, 9, f_dashHit(longTp4Hit, longTP4), text_color = longTp4Hit ? color.new(color.green, 0) : color.white, text_size = f_dashSize())
+        if allowShort
+            table.cell(dash, cS, 9, f_dashHit(shortTp4Hit, shortTP4), text_color = shortTp4Hit ? color.new(color.green, 0) : color.white, text_size = f_dashSize())
+
+// --- VWAP (calc spine-identical; visibility via COLOR so the value stays
+// readable in the Data Window even when hidden) -----------------------------------
+plot(vwapVal, "VWAP", color = showVWAP ? color.new(color.blue, 0) : na, linewidth = 2)
